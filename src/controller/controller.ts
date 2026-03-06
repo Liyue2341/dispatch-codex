@@ -132,6 +132,7 @@ export class BridgeController {
           '/threads',
           '/open <n>',
           '/new [cwd]',
+          '/reveal',
           '/where',
           '/interrupt',
           'Plain text continues the current thread, or creates one if none is bound.'
@@ -144,6 +145,8 @@ export class BridgeController {
           `Connected: ${this.app.isConnected() ? 'yes' : 'no'}`,
           `User agent: ${this.app.getUserAgent() ?? 'unknown'}`,
           `Current thread: ${binding?.threadId ?? 'none'}`,
+          `Sync on /open: ${this.config.codexAppSyncOnOpen ? 'yes' : 'no'}`,
+          `Sync on turn complete: ${this.config.codexAppSyncOnTurnComplete ? 'yes' : 'no'}`,
           `Pending approvals: ${this.store.countPendingApprovals()}`,
           `Active turns: ${this.activeTurns.size}`,
         ];
@@ -192,13 +195,34 @@ export class BridgeController {
           return;
         }
         this.store.setBinding(event.chatId, thread.threadId, thread.cwd);
-        await this.bot.sendMessage(event.chatId, `Bound to thread ${thread.threadId}`);
+        const lines = [`Bound to thread ${thread.threadId}`];
+        if (this.config.codexAppSyncOnOpen) {
+          const revealError = await this.tryRevealThread(event.chatId, thread.threadId, 'open');
+          lines.push(revealError ? `Codex.app sync failed: ${revealError}` : 'Opened in Codex.app.');
+        }
+        await this.bot.sendMessage(event.chatId, lines.join('\n'));
         return;
       }
       case 'new': {
         const cwd = args.join(' ').trim() || this.config.defaultCwd;
         const binding = await this.createBinding(event.chatId, cwd);
         await this.bot.sendMessage(event.chatId, `Started new thread ${binding.threadId}\nCWD: ${binding.cwd ?? cwd}`);
+        return;
+      }
+      case 'reveal':
+      case 'focus': {
+        const binding = this.store.getBinding(event.chatId);
+        if (!binding) {
+          await this.bot.sendMessage(event.chatId, 'No thread is currently bound. Use /open, /new, or send a message first.');
+          return;
+        }
+        const readyBinding = await this.ensureThreadReady(event.chatId, binding);
+        const revealError = await this.tryRevealThread(event.chatId, readyBinding.threadId, 'reveal');
+        if (revealError) {
+          await this.bot.sendMessage(event.chatId, `Failed to open Codex.app thread: ${revealError}`);
+          return;
+        }
+        await this.bot.sendMessage(event.chatId, `Opened thread ${readyBinding.threadId} in Codex.app.`);
         return;
       }
       case 'interrupt': {
@@ -270,6 +294,17 @@ export class BridgeController {
         const active = this.activeTurns.get(String(params.turn?.id));
         if (!active) return;
         await this.flushPreview(active, true);
+        if (this.config.codexAppSyncOnTurnComplete) {
+          const revealError = await this.tryRevealThread(active.chatId, active.threadId, 'turn-complete');
+          if (revealError) {
+            this.logger.warn('codex.reveal_thread_failed', {
+              chatId: active.chatId,
+              threadId: active.threadId,
+              reason: 'turn-complete',
+              error: revealError,
+            });
+          }
+        }
         active.resolver();
         this.activeTurns.delete(active.turnId);
         this.updateStatus();
@@ -503,6 +538,16 @@ export class BridgeController {
     } finally {
       this.clearApprovalTimer(localId);
       this.updateStatus();
+    }
+  }
+
+  private async tryRevealThread(chatId: string, threadId: string, reason: 'open' | 'reveal' | 'turn-complete'): Promise<string | null> {
+    try {
+      await this.app.revealThread(threadId);
+      this.store.insertAudit('outbound', chatId, 'codex.app.reveal', `${reason}:${threadId}`);
+      return null;
+    } catch (error) {
+      return formatUserError(error);
     }
   }
 }

@@ -3,6 +3,7 @@ import net from 'node:net';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import type { Logger } from '../logger.js';
+import { buildThreadDeepLink, openUrl } from './deeplink.js';
 
 interface JsonRpcResponse {
   id: string | number;
@@ -135,6 +136,11 @@ export class CodexAppClient extends EventEmitter {
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {
     await this.request('turn/interrupt', { threadId, turnId });
+  }
+
+  async revealThread(threadId: string): Promise<void> {
+    const url = buildThreadDeepLink(threadId);
+    await openUrl(url);
   }
 
   async respond(requestId: string | number, result: unknown): Promise<void> {

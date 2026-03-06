@@ -149,6 +149,7 @@ export class TelegramGateway extends EventEmitter {
         { command: 'threads', description: 'List recent threads' },
         { command: 'open', description: 'Open cached thread by number' },
         { command: 'new', description: 'Start a new thread' },
+        { command: 'reveal', description: 'Open the current thread in Codex.app' },
         { command: 'where', description: 'Show current binding' },
         { command: 'interrupt', description: 'Interrupt the active turn' },
       ],

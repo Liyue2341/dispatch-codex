@@ -16,6 +16,8 @@ export interface AppConfig {
   codexCliBin: string;
   codexAppAutolaunch: boolean;
   codexAppLaunchCmd: string;
+  codexAppSyncOnOpen: boolean;
+  codexAppSyncOnTurnComplete: boolean;
   storePath: string;
   logLevel: LogLevel;
   defaultCwd: string;
@@ -35,6 +37,8 @@ export function loadConfig(): AppConfig {
     codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
     codexAppAutolaunch: boolEnv('CODEX_APP_AUTOLAUNCH', true),
     codexAppLaunchCmd: process.env.CODEX_APP_LAUNCH_CMD || 'codex app',
+    codexAppSyncOnOpen: boolEnv('CODEX_APP_SYNC_ON_OPEN', true),
+    codexAppSyncOnTurnComplete: boolEnv('CODEX_APP_SYNC_ON_TURN_COMPLETE', false),
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,
     logLevel: parseLogLevel(process.env.LOG_LEVEL || 'info'),
     defaultCwd: process.env.DEFAULT_CWD || process.cwd(),
