@@ -59,6 +59,7 @@ async function main(): Promise<void> {
     logger,
   );
   const app = new CodexAppClient(
+    config.codexCliBin,
     config.codexAppLaunchCmd,
     config.codexAppAutolaunch,
     logger,

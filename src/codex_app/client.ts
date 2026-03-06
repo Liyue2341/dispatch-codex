@@ -33,6 +33,7 @@ export class CodexAppClient extends EventEmitter {
   private userAgent: string | null = null;
 
   constructor(
+    private readonly codexCliBin: string,
     private readonly launchCommand: string,
     private readonly autolaunch: boolean,
     private readonly logger: Logger,
@@ -150,7 +151,7 @@ export class CodexAppClient extends EventEmitter {
       launcher.unref();
     }
     this.port = await reservePort();
-    this.child = spawn('codex', ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
+    this.child = spawn(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this.child.stderr?.on('data', chunk => {

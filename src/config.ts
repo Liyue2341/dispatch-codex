@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import dotenv from 'dotenv';
 import type { LogLevel } from './logger.js';
 
@@ -12,6 +13,7 @@ export const DEFAULT_LOG_PATH = path.join(APP_HOME, 'logs', 'service.log');
 export interface AppConfig {
   tgBotToken: string;
   tgAllowedUserId: string;
+  codexCliBin: string;
   codexAppAutolaunch: boolean;
   codexAppLaunchCmd: string;
   storePath: string;
@@ -30,6 +32,7 @@ export function loadConfig(): AppConfig {
   const config: AppConfig = {
     tgBotToken: required('TG_BOT_TOKEN'),
     tgAllowedUserId: required('TG_ALLOWED_USER_ID'),
+    codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
     codexAppAutolaunch: boolEnv('CODEX_APP_AUTOLAUNCH', true),
     codexAppLaunchCmd: process.env.CODEX_APP_LAUNCH_CMD || 'codex app',
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,
@@ -86,4 +89,15 @@ function parseLogLevel(value: string): LogLevel {
 function parseApprovalPolicy(value: string): AppConfig['defaultApprovalPolicy'] {
   if (value === 'on-failure' || value === 'never' || value === 'untrusted' || value === 'on-request') return value;
   return 'on-request';
+}
+
+function resolveCommand(commandName: string): string | null {
+  try {
+    const which = process.platform === 'win32' ? 'where' : 'which';
+    const result = spawnSync(which, [commandName], { encoding: 'utf8' });
+    if (result.status !== 0) return null;
+    return String(result.stdout).trim().split(/\r?\n/, 1)[0] || null;
+  } catch {
+    return null;
+  }
 }

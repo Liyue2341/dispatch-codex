@@ -3,6 +3,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 PLIST="$HOME/Library/LaunchAgents/com.ganxing.telegram-codex-app-bridge.plist"
 NODE_BIN="$(command -v node)"
+PATH_VALUE="$PATH"
+HOME_VALUE="$HOME"
+USER_VALUE="${USER:-ganxing}"
+LOGNAME_VALUE="${LOGNAME:-$USER_VALUE}"
 if [[ -z "$NODE_BIN" ]]; then
   echo "node not found in PATH" >&2
   exit 1
@@ -23,6 +27,17 @@ cat > "$PLIST" <<PLIST
   </array>
   <key>WorkingDirectory</key>
   <string>$ROOT_DIR</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$PATH_VALUE</string>
+    <key>HOME</key>
+    <string>$HOME_VALUE</string>
+    <key>USER</key>
+    <string>$USER_VALUE</string>
+    <key>LOGNAME</key>
+    <string>$LOGNAME_VALUE</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
