@@ -1,0 +1,37 @@
+export const TELEGRAM_MESSAGE_LIMIT = 4000;
+
+export function sanitizeTelegramPreview(text: string): string {
+  if (!text.trim()) return 'Working...';
+  return text.length > TELEGRAM_MESSAGE_LIMIT
+    ? `${text.slice(0, TELEGRAM_MESSAGE_LIMIT - 3)}...`
+    : text;
+}
+
+export function chunkTelegramMessage(text: string, limit = TELEGRAM_MESSAGE_LIMIT): string[] {
+  const source = text.trim() ? text : 'Completed.';
+  if (source.length <= limit) {
+    return [source];
+  }
+
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < source.length) {
+    const remaining = source.length - start;
+    if (remaining <= limit) {
+      chunks.push(source.slice(start));
+      break;
+    }
+
+    const tentativeEnd = start + limit;
+    const window = source.slice(start, tentativeEnd);
+    const splitAt = Math.max(window.lastIndexOf('\n\n'), window.lastIndexOf('\n'));
+    const end = splitAt >= Math.floor(limit / 2)
+      ? start + splitAt + 1
+      : tentativeEnd;
+
+    chunks.push(source.slice(start, end));
+    start = end;
+  }
+
+  return chunks.filter(chunk => chunk.length > 0);
+}

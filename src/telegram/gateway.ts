@@ -119,6 +119,16 @@ export class TelegramGateway extends EventEmitter {
     }
   }
 
+  async deleteMessage(chatId: string, messageId: number): Promise<void> {
+    const result = await callTelegramApi(this.botToken, 'deleteMessage', {
+      chat_id: chatId,
+      message_id: messageId,
+    });
+    if (!result.ok) {
+      throw new Error(result.description || 'Failed to delete Telegram message');
+    }
+  }
+
   async answerCallback(callbackQueryId: string, text = 'OK'): Promise<void> {
     await callTelegramApi(this.botToken, 'answerCallbackQuery', {
       callback_query_id: callbackQueryId,

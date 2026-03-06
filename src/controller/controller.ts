@@ -5,6 +5,7 @@ import type { BridgeStore } from '../store/database.js';
 import type { PendingApprovalRecord, RuntimeStatus, ThreadBinding } from '../types.js';
 import { parseCommand } from './commands.js';
 import type { TelegramGateway, TelegramTextEvent, TelegramCallbackEvent } from '../telegram/gateway.js';
+import { chunkTelegramMessage, sanitizeTelegramPreview } from '../telegram/text.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest } from '../codex_app/client.js';
 import { writeRuntimeStatus } from '../runtime.js';
 
@@ -286,28 +287,30 @@ export class BridgeController {
         const active = this.activeTurns.get(String(params.turnId));
         if (!active) return;
         active.finalText = String(params.item.text || active.buffer || 'Completed.');
-        await this.flushPreview(active, true);
         return;
       }
       case 'turn/completed': {
         const params = notification.params as any;
         const active = this.activeTurns.get(String(params.turn?.id));
         if (!active) return;
-        await this.flushPreview(active, true);
-        if (this.config.codexAppSyncOnTurnComplete) {
-          const revealError = await this.tryRevealThread(active.chatId, active.threadId, 'turn-complete');
-          if (revealError) {
-            this.logger.warn('codex.reveal_thread_failed', {
-              chatId: active.chatId,
-              threadId: active.threadId,
-              reason: 'turn-complete',
-              error: revealError,
-            });
+        try {
+          await this.completeTurn(active);
+          if (this.config.codexAppSyncOnTurnComplete) {
+            const revealError = await this.tryRevealThread(active.chatId, active.threadId, 'turn-complete');
+            if (revealError) {
+              this.logger.warn('codex.reveal_thread_failed', {
+                chatId: active.chatId,
+                threadId: active.threadId,
+                reason: 'turn-complete',
+                error: revealError,
+              });
+            }
           }
+        } finally {
+          active.resolver();
+          this.activeTurns.delete(active.turnId);
+          this.updateStatus();
         }
-        active.resolver();
-        this.activeTurns.delete(active.turnId);
-        this.updateStatus();
         return;
       }
       case 'error': {
@@ -402,12 +405,30 @@ export class BridgeController {
   private async flushPreview(active: ActiveTurn, force: boolean): Promise<void> {
     const now = Date.now();
     if (!force && now - active.lastFlushAt < this.config.telegramPreviewThrottleMs) return;
-    const text = sanitizeTelegramText(active.finalText || active.buffer || 'Working...');
+    const text = sanitizeTelegramPreview(active.buffer || active.finalText || 'Working...');
     active.lastFlushAt = now;
     try {
       await this.bot.editMessage(active.chatId, active.previewMessageId, text);
     } catch (error) {
       this.logger.warn('telegram.preview_edit_failed', { error: String(error) });
+    }
+  }
+
+  private async completeTurn(active: ActiveTurn): Promise<void> {
+    const finalChunks = chunkTelegramMessage(active.finalText || active.buffer || 'Completed.');
+    for (const chunk of finalChunks) {
+      await this.bot.sendMessage(active.chatId, chunk);
+    }
+
+    try {
+      await this.bot.deleteMessage(active.chatId, active.previewMessageId);
+    } catch (error) {
+      this.logger.warn('telegram.preview_delete_failed', { error: String(error) });
+      try {
+        await this.bot.editMessage(active.chatId, active.previewMessageId, 'Completed. See the reply below.');
+      } catch (fallbackError) {
+        this.logger.warn('telegram.preview_cleanup_failed', { error: String(fallbackError) });
+      }
     }
   }
 
@@ -550,11 +571,6 @@ export class BridgeController {
       return formatUserError(error);
     }
   }
-}
-
-function sanitizeTelegramText(text: string): string {
-  if (!text.trim()) return 'Working...';
-  return text.length > 4000 ? `${text.slice(0, 3997)}...` : text;
 }
 
 function formatUnix(value: unknown): string {
