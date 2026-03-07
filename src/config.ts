@@ -9,6 +9,7 @@ export const APP_HOME = path.join(os.homedir(), '.telegram-codex-app-bridge');
 export const DEFAULT_STORE_PATH = path.join(APP_HOME, 'data', 'bridge.sqlite');
 export const DEFAULT_STATUS_PATH = path.join(APP_HOME, 'runtime', 'status.json');
 export const DEFAULT_LOG_PATH = path.join(APP_HOME, 'logs', 'service.log');
+export const DEFAULT_LOCK_PATH = path.join(APP_HOME, 'runtime', 'bridge.lock');
 
 export interface AppConfig {
   tgBotToken: string;
@@ -29,6 +30,7 @@ export interface AppConfig {
   threadListLimit: number;
   statusPath: string;
   logPath: string;
+  lockPath: string;
 }
 
 export function loadConfig(): AppConfig {
@@ -51,7 +53,8 @@ export function loadConfig(): AppConfig {
     telegramPreviewThrottleMs: intEnv('TELEGRAM_PREVIEW_THROTTLE_MS', 800),
     threadListLimit: intEnv('THREAD_LIST_LIMIT', 10),
     statusPath: DEFAULT_STATUS_PATH,
-    logPath: DEFAULT_LOG_PATH
+    logPath: DEFAULT_LOG_PATH,
+    lockPath: process.env.LOCK_PATH || DEFAULT_LOCK_PATH,
   };
   ensureAppDirs(config);
   return config;
@@ -61,7 +64,8 @@ export function ensureAppDirs(config: AppConfig): void {
   const dirs = [
     path.dirname(config.storePath),
     path.dirname(config.statusPath),
-    path.dirname(config.logPath)
+    path.dirname(config.logPath),
+    path.dirname(config.lockPath),
   ];
   for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true });

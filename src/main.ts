@@ -8,6 +8,7 @@ import { BridgeStore } from './store/database.js';
 import { TelegramGateway } from './telegram/gateway.js';
 import { CodexAppClient } from './codex_app/client.js';
 import { BridgeController } from './controller/controller.js';
+import { acquireProcessLock, LockHeldError } from './lock.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 
 const command = process.argv[2] || 'serve';
@@ -51,57 +52,70 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   const logger = new Logger(config.logLevel, config.logPath);
-  const store = new BridgeStore(config.storePath);
-  const bot = new TelegramGateway(
-    config.tgBotToken,
-    config.tgAllowedUserId,
-    config.tgAllowedChatId,
-    config.telegramPollIntervalMs,
-    store,
-    logger,
-  );
-  const app = new CodexAppClient(
-    config.codexCliBin,
-    config.codexAppLaunchCmd,
-    config.codexAppAutolaunch,
-    logger,
-  );
-  const controller = new BridgeController(config, store, logger, bot, app);
+  const processLock = acquireProcessLock(config.lockPath);
+  let store: BridgeStore | null = null;
+  try {
+    store = new BridgeStore(config.storePath);
+    const bot = new TelegramGateway(
+      config.tgBotToken,
+      config.tgAllowedUserId,
+      config.tgAllowedChatId,
+      config.telegramPollIntervalMs,
+      store,
+      logger,
+    );
+    const app = new CodexAppClient(
+      config.codexCliBin,
+      config.codexAppLaunchCmd,
+      config.codexAppAutolaunch,
+      logger,
+    );
+    const controller = new BridgeController(config, store, logger, bot, app);
 
-  process.on('unhandledRejection', (error) => {
-    logger.error('process.unhandled_rejection', { error: serializeError(error) });
-  });
-
-  process.on('uncaughtException', (error) => {
-    logger.error('process.uncaught_exception', { error: serializeError(error) });
-  });
-
-  await controller.start();
-  logger.info('bridge.started', controller.getRuntimeStatus());
-
-  const shutdown = async (signal: string): Promise<void> => {
-    logger.info('bridge.shutting_down', { signal });
-    await controller.stop();
-    writeRuntimeStatus(config.statusPath, {
-      running: false,
-      connected: false,
-      userAgent: app.getUserAgent(),
-      botUsername: bot.username,
-      currentBindings: 0,
-      pendingApprovals: 0,
-      activeTurns: 0,
-      lastError: null,
-      updatedAt: new Date().toISOString(),
+    process.on('unhandledRejection', (error) => {
+      logger.error('process.unhandled_rejection', { error: serializeError(error) });
     });
-    store.close();
-    process.exit(0);
-  };
 
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+    process.on('uncaughtException', (error) => {
+      logger.error('process.uncaught_exception', { error: serializeError(error) });
+    });
+
+    await controller.start();
+    logger.info('bridge.started', controller.getRuntimeStatus());
+
+    const shutdown = async (signal: string): Promise<void> => {
+      logger.info('bridge.shutting_down', { signal });
+      await controller.stop();
+      writeRuntimeStatus(config.statusPath, {
+        running: false,
+        connected: false,
+        userAgent: app.getUserAgent(),
+        botUsername: bot.username,
+        currentBindings: 0,
+        pendingApprovals: 0,
+        activeTurns: 0,
+        lastError: null,
+        updatedAt: new Date().toISOString(),
+      });
+      store?.close();
+      processLock.release();
+      process.exit(0);
+    };
+
+    process.on('SIGINT', () => void shutdown('SIGINT'));
+    process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  } catch (error) {
+    store?.close();
+    processLock.release();
+    throw error;
+  }
 }
 
 void main().catch((error) => {
+  if (error instanceof LockHeldError) {
+    console.error(error.message);
+    process.exit(1);
+  }
   console.error(error);
   process.exit(1);
 });

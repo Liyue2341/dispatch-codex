@@ -1,0 +1,108 @@
+# Telegram x Codex Interaction Redesign TODO
+
+## Goal
+
+Make the Telegram bridge feel as close to Codex App as possible while supporting both `private chat` and `topic` usage.
+
+## Phase 0: Baseline Confirmation
+
+- [x] Confirm the current bridge routing for `private chat`, `private topic`, and `group topic`
+- [x] Confirm Telegram API capability boundaries: where `sendMessageDraft` is available and where fallback rendering is required
+- [x] Confirm current upstream event sources: `item/*`, raw events, `exec_command_begin/end`, interrupt, and approval
+
+Acceptance criteria:
+
+- [x] A clear `chat type -> renderer` routing table exists
+- [x] Event ingestion and UI rendering are no longer coupled conceptually
+
+## Phase 1: Unified Event Model
+
+- [x] Normalize Codex-side events into one internal activity stream
+- [x] Define internal activity states: `thinking`, `reading`, `searching`, `editing`, `running_command`, `approval_waiting`, `completed`
+- [x] Define output buckets: `commentary`, `final_answer`, `tool_summary`, `error`
+
+Acceptance criteria:
+
+- [x] The same event stream can drive both the `private renderer` and the `topic renderer`
+- [x] Renderer changes no longer require touching core event parsing
+
+## Phase 2: Private Renderer
+
+- [x] In `private chat` and `private topic`, prefer `sendMessageDraft`
+- [x] Render `thinking / browsing / executing` as a live draft state instead of a top-pinned status message
+- [x] Render the body as a continuously updating draft so it feels closer to Codex App
+- [x] Keep the current status and interrupt affordance at the bottom once body output begins
+
+Acceptance criteria:
+
+- [x] No stale top status bar remains in private mode
+- [x] The latest status and latest content are always visible at the bottom
+- [x] Interrupt controls stay attached to the active output
+
+## Phase 3: Topic Renderer
+
+- [x] Keep `group topic` on normal-message rendering
+- [x] Use `bottom activity card + segmented body messages` to approximate Codex App behavior
+- [x] Stop editing one giant body message forever
+- [x] Separate tool-action summaries from body messages
+
+Acceptance criteria:
+
+- [x] Topic mode no longer leaves an old status message hanging at the top
+- [x] Body output lands in readable stage-based chunks
+
+## Phase 4: Activity Card Semantics
+
+- [x] Support Codex-App-like states such as `正在思考`, `正在浏览 2 个文件, 1 个搜索`, `已浏览 ...`
+- [x] Archive each finished activity summary before moving to the next stage
+- [x] Keep status cards focused on current activity, not long-form body content
+
+Acceptance criteria:
+
+- [x] Users can always tell what the bot is doing right now
+- [x] Status transitions are continuous and understandable
+
+## Phase 5: Tool Details And Folding
+
+- [x] Group `Read ...`, `Searched for ...`, `Ran ...`, and `Edited ...` into tool-detail summaries
+- [x] Use foldable rendering when Telegram allows it; otherwise keep summaries short and details clear
+- [x] Improve edit summaries so they are closer to Codex App output
+
+Acceptance criteria:
+
+- [x] Users can understand what operations were performed
+- [x] Tool details do not drown out the assistant body text
+
+## Phase 6: Interrupt And Approval Semantics
+
+- [x] Show `已请求中断` immediately after an interrupt is requested
+- [x] Mark any post-interrupt residual output as partial output
+- [x] Represent approval waiting separately from thinking/output states
+- [x] Clean up stale buttons, stale status cards, and invalid controls
+
+Acceptance criteria:
+
+- [x] Users can distinguish thinking, waiting for approval, winding down, and interrupted states
+- [x] The UI no longer feels frozen or semantically misleading after an interrupt
+
+## Phase 7: Recovery And Stability
+
+- [x] Recover activity-card and body state after transient Telegram/network failures
+- [x] Restore visible active-turn state as well as possible after a bridge restart
+- [x] Prevent duplicate polling, duplicate sends, and duplicate archived summaries
+
+Acceptance criteria:
+
+- [x] Temporary Telegram/network failures do not leave permanent zombie UI
+- [x] Service restarts do not create obviously broken status sequences
+
+## Phase 8: Config, Docs, And Tests
+
+- [x] Document the intended behavior: private chat preferred, topic fallback, capability matrix
+- [x] Add regression coverage for private streaming, topic streaming, interrupt, approval, and reconnect behavior
+- [x] Document which effects are only achievable in private chat and which are approximations in topic mode
+
+Acceptance criteria:
+
+- [x] The behavior boundaries are documented
+- [x] Future renderer changes are less likely to regress into the old UX

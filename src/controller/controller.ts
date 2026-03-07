@@ -28,10 +28,18 @@ import {
   type StagedTelegramAttachment,
   type TelegramInboundAttachment,
 } from '../telegram/media.js';
-import { chunkTelegramMessage, chunkTelegramStreamMessage } from '../telegram/text.js';
+import { chunkTelegramMessage, chunkTelegramStreamMessage, clipTelegramDraftMessage } from '../telegram/text.js';
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { parseTelegramScopeId } from '../telegram/scope.js';
+import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
 import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
+import {
+  normalizeTurnActivityEvent,
+  type RawExecCommandEvent,
+  type TurnActivityEvent,
+  type TurnOutputKind,
+} from './activity.js';
+import { renderActiveTurnStatus } from './status.js';
 import { writeRuntimeStatus } from '../runtime.js';
 
 interface RenderedTelegramMessage {
@@ -42,6 +50,7 @@ interface RenderedTelegramMessage {
 interface ActiveTurnSegment {
   itemId: string;
   phase: string | null;
+  outputKind: TurnOutputKind;
   text: string;
   completed: boolean;
   messages: RenderedTelegramMessage[];
@@ -62,12 +71,9 @@ interface ToolBatchState {
   finalizeTimer: NodeJS.Timeout | null;
 }
 
-interface RawExecCommandEvent {
-  callId: string;
-  turnId: string;
-  command: string[];
-  cwd: string | null;
-  parsedCmd: any[];
+interface ArchivedStatusContent {
+  text: string;
+  html: string | null;
 }
 
 interface ToolDescriptor {
@@ -80,10 +86,13 @@ interface ActiveTurn {
   scopeId: string;
   chatId: string;
   topicId: number | null;
+  renderRoute: TelegramRenderRoute;
   threadId: string;
   turnId: string;
   previewMessageId: number;
   previewActive: boolean;
+  draftId: number | null;
+  draftText: string | null;
   buffer: string;
   finalText: string | null;
   interruptRequested: boolean;
@@ -91,8 +100,10 @@ interface ActiveTurn {
   statusNeedsRebase: boolean;
   segments: ActiveTurnSegment[];
   reasoningActiveCount: number;
+  pendingApprovalKinds: Set<PendingApprovalRecord['kind']>;
   toolBatch: ToolBatchState | null;
-  pendingArchivedStatusText: string | null;
+  pendingArchivedStatus: ArchivedStatusContent | null;
+  renderRetryTimer: NodeJS.Timeout | null;
   lastStreamFlushAt: number;
   renderRequested: boolean;
   forceStatusFlush: boolean;
@@ -223,13 +234,15 @@ export class BridgeController {
       ? await this.ensureThreadReady(scopeId, existingBinding)
       : await this.createBinding(scopeId, null);
     await this.sendTyping(scopeId);
-    const previewMessageId = await this.sendMessage(scopeId, t(locale, 'working'));
+    const previewMessageId = 0;
     try {
       const input = await this.buildTurnInput(binding, { ...event, text: decision.text }, locale);
       const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
-      await this.registerActiveTurn(scopeId, event.chatId, event.topicId, turnState.threadId, turnState.turnId, previewMessageId);
+      await this.registerActiveTurn(scopeId, event.chatId, event.chatType, event.topicId, turnState.threadId, turnState.turnId, previewMessageId);
     } catch (error) {
-      await this.cleanupTransientPreview(scopeId, previewMessageId);
+      if (previewMessageId > 0) {
+        await this.cleanupTransientPreview(scopeId, previewMessageId);
+      }
       throw error;
     }
   }
@@ -417,6 +430,7 @@ export class BridgeController {
     await this.app.respond(approval.serverRequestId, result);
     this.store.markApprovalResolved(localId);
     this.clearApprovalTimer(localId);
+    await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
     await this.bot.answerCallback(event.callbackQueryId, t(locale, 'decision_recorded'));
     if (approval.messageId !== null) {
       await this.editMessage(scopeId, approval.messageId, renderApprovalMessage(locale, approval, action));
@@ -425,6 +439,12 @@ export class BridgeController {
   }
 
   private async handleNotification(notification: JsonRpcNotification): Promise<void> {
+    const activity = normalizeTurnActivityEvent(notification);
+    if (activity) {
+      await this.handleTurnActivityEvent(activity);
+      return;
+    }
+
     switch (notification.method) {
       case 'sessionConfigured': {
         const params = notification.params as any;
@@ -456,113 +476,6 @@ export class BridgeController {
         this.updateStatus();
         return;
       }
-      case 'item/started': {
-        const turnId = extractTurnId(notification.params);
-        if (!turnId) return;
-        const active = this.activeTurns.get(turnId);
-        if (!active) return;
-        const item = notification.params?.item;
-        const itemType = normalizeEventItemType(item);
-        if (itemType === 'agentmessage' || itemType === 'assistantmessage') {
-          this.promoteReadyToolBatch(active);
-          const itemId = extractItemId(item);
-          if (!itemId) return;
-          ensureTurnSegment(active, itemId, extractAgentPhase(item));
-          await this.queueTurnRender(active, { forceStatus: true });
-          return;
-        }
-        if (itemType === 'reasoning') {
-          this.promoteReadyToolBatch(active);
-          active.reasoningActiveCount += 1;
-          await this.queueTurnRender(active, { forceStatus: true });
-        }
-        return;
-      }
-      case 'item/agentMessage/delta': {
-        const turnId = extractTurnId(notification.params);
-        const delta = extractAgentDeltaText(notification.params);
-        const itemId = extractItemId(notification.params);
-        if (!turnId || !delta || !itemId) return;
-        const active = this.activeTurns.get(turnId);
-        if (!active) return;
-        const segment = ensureTurnSegment(active, itemId);
-        segment.text += delta;
-        active.buffer += delta;
-        await this.queueTurnRender(active);
-        return;
-      }
-      case 'item/completed': {
-        const turnId = extractTurnId(notification.params);
-        if (!turnId) return;
-        const active = this.activeTurns.get(turnId);
-        if (!active) return;
-        const item = notification.params?.item;
-        const itemType = normalizeEventItemType(item);
-        if (itemType === 'reasoning') {
-          active.reasoningActiveCount = Math.max(0, active.reasoningActiveCount - 1);
-          await this.queueTurnRender(active, { forceStatus: true });
-          return;
-        }
-        if (itemType !== 'agentmessage' && itemType !== 'assistantmessage') {
-          return;
-        }
-        const itemId = extractItemId(item);
-        if (!itemId) return;
-        const segment = ensureTurnSegment(active, itemId, extractAgentPhase(item));
-        const completedText = extractCompletedAgentText(notification.params);
-        if (completedText !== null) {
-          segment.text = completedText || segment.text;
-          active.finalText = completedText || active.buffer || t(this.localeForChat(active.scopeId), 'completed');
-        }
-        segment.completed = true;
-        await this.queueTurnRender(active, { forceStream: true, forceStatus: true });
-        return;
-      }
-      case 'codex/event/exec_command_begin': {
-        const execEvent = extractRawExecCommandEvent(notification.params);
-        if (!execEvent) return;
-        const active = this.activeTurns.get(execEvent.turnId);
-        if (!active) return;
-        this.noteToolCommandStart(active, execEvent);
-        await this.queueTurnRender(active, { forceStatus: true });
-        return;
-      }
-      case 'codex/event/exec_command_end': {
-        const execEvent = extractRawExecCommandEvent(notification.params);
-        if (!execEvent) return;
-        const active = this.activeTurns.get(execEvent.turnId);
-        if (!active) return;
-        this.noteToolCommandEnd(active, execEvent);
-        await this.queueTurnRender(active, { forceStatus: true });
-        return;
-      }
-      case 'turn/completed': {
-        const params = notification.params as any;
-        const turnId = extractTurnId(params);
-        if (!turnId) return;
-        const active = this.activeTurns.get(turnId);
-        if (!active) return;
-        try {
-          this.promoteReadyToolBatch(active);
-          await this.completeTurn(active);
-          if (this.config.codexAppSyncOnTurnComplete) {
-            const revealError = await this.tryRevealThread(active.scopeId, active.threadId, 'turn-complete');
-            if (revealError) {
-              this.logger.warn('codex.reveal_thread_failed', {
-                scopeId: active.scopeId,
-                threadId: active.threadId,
-                reason: 'turn-complete',
-                error: revealError,
-              });
-            }
-          }
-        } finally {
-          active.resolver();
-          this.activeTurns.delete(active.turnId);
-          this.updateStatus();
-        }
-        return;
-      }
       case 'error': {
         this.lastError = JSON.stringify(notification.params ?? {});
         this.logger.error('codex.notification.error', notification.params);
@@ -579,6 +492,7 @@ export class BridgeController {
       case 'item/commandExecution/requestApproval': {
         const params = request.params as any;
         const approval = this.createApprovalRecord('command', request.id, params);
+        await this.notePendingApprovalStatus(approval.threadId, approval.kind);
         const locale = this.localeForChat(approval.chatId);
         const messageId = await this.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
         this.store.updatePendingApprovalMessage(approval.localId, messageId);
@@ -589,6 +503,7 @@ export class BridgeController {
       case 'item/fileChange/requestApproval': {
         const params = request.params as any;
         const approval = this.createApprovalRecord('fileChange', request.id, params);
+        await this.notePendingApprovalStatus(approval.threadId, approval.kind);
         const locale = this.localeForChat(approval.chatId);
         const messageId = await this.sendMessage(approval.chatId, renderApprovalMessage(locale, approval), approvalKeyboard(locale, approval.localId));
         this.store.updatePendingApprovalMessage(approval.localId, messageId);
@@ -736,6 +651,7 @@ export class BridgeController {
   private async registerActiveTurn(
     scopeId: string,
     chatId: string,
+    chatType: string,
     topicId: number | null,
     threadId: string,
     turnId: string,
@@ -749,10 +665,13 @@ export class BridgeController {
       scopeId,
       chatId,
       topicId,
+      renderRoute: resolveTelegramRenderRoute(chatType, topicId),
       threadId,
       turnId,
       previewMessageId,
-      previewActive: true,
+      previewActive: previewMessageId > 0,
+      draftId: null,
+      draftText: null,
       buffer: '',
       finalText: null,
       interruptRequested: false,
@@ -760,8 +679,10 @@ export class BridgeController {
       statusNeedsRebase: false,
       segments: [],
       reasoningActiveCount: 0,
+      pendingApprovalKinds: new Set(),
       toolBatch: null,
-      pendingArchivedStatusText: null,
+      pendingArchivedStatus: null,
+      renderRetryTimer: null,
       lastStreamFlushAt: 0,
       renderRequested: false,
       forceStatusFlush: false,
@@ -770,12 +691,14 @@ export class BridgeController {
       resolver: resolveTurn,
     };
     this.activeTurns.set(turnId, active);
-    this.store.saveActiveTurnPreview({
-      turnId,
-      scopeId,
-      threadId,
-      messageId: previewMessageId,
-    });
+    if (previewMessageId > 0) {
+      this.store.saveActiveTurnPreview({
+        turnId,
+        scopeId,
+        threadId,
+        messageId: previewMessageId,
+      });
+    }
     this.updateStatus();
     try {
       await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
@@ -787,6 +710,7 @@ export class BridgeController {
 
   private async completeTurn(active: ActiveTurn): Promise<void> {
     const locale = this.localeForChat(active.scopeId);
+    let shouldMarkPartialOutput = false;
     try {
       await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
       const renderedMessages = active.segments.reduce((count, segment) => count + segment.messages.length, 0);
@@ -797,8 +721,92 @@ export class BridgeController {
           await this.sendMessage(active.scopeId, chunk);
         }
       }
+      shouldMarkPartialOutput = active.interruptRequested
+        && (renderedMessages > 0 || Boolean((active.finalText || active.buffer).trim()));
     } finally {
+      this.clearRenderRetry(active);
       await this.cleanupFinishedPreview(active, locale);
+    }
+    if (shouldMarkPartialOutput) {
+      await this.sendMessage(active.scopeId, t(locale, 'interrupted_partial_output'));
+    }
+  }
+
+  private async handleTurnActivityEvent(activity: TurnActivityEvent): Promise<void> {
+    const active = this.activeTurns.get(activity.turnId);
+    if (!active) {
+      return;
+    }
+
+    switch (activity.kind) {
+      case 'agent_message_started': {
+        this.promoteReadyToolBatch(active);
+        ensureTurnSegment(active, activity.itemId, activity.phase, activity.outputKind);
+        await this.queueTurnRender(active, { forceStatus: true });
+        return;
+      }
+      case 'agent_message_delta': {
+        const segment = ensureTurnSegment(active, activity.itemId, undefined, activity.outputKind);
+        segment.text += activity.delta;
+        active.buffer += activity.delta;
+        await this.queueTurnRender(active);
+        return;
+      }
+      case 'agent_message_completed': {
+        const segment = ensureTurnSegment(active, activity.itemId, activity.phase, activity.outputKind);
+        if (activity.text !== null) {
+          segment.text = activity.text || segment.text;
+          if (activity.outputKind === 'final_answer') {
+            active.finalText = activity.text || active.buffer || t(this.localeForChat(active.scopeId), 'completed');
+          }
+        }
+        segment.completed = true;
+        await this.queueTurnRender(active, { forceStream: true, forceStatus: true });
+        return;
+      }
+      case 'reasoning_started': {
+        this.promoteReadyToolBatch(active);
+        active.reasoningActiveCount += 1;
+        await this.queueTurnRender(active, { forceStatus: true });
+        return;
+      }
+      case 'reasoning_completed': {
+        active.reasoningActiveCount = Math.max(0, active.reasoningActiveCount - 1);
+        await this.queueTurnRender(active, { forceStatus: true });
+        return;
+      }
+      case 'tool_started': {
+        this.noteToolCommandStart(active, activity.exec);
+        await this.queueTurnRender(active, { forceStatus: true });
+        return;
+      }
+      case 'tool_completed': {
+        this.noteToolCommandEnd(active, activity.exec);
+        await this.queueTurnRender(active, { forceStatus: true });
+        return;
+      }
+      case 'turn_completed': {
+        try {
+          this.promoteReadyToolBatch(active);
+          await this.completeTurn(active);
+          if (this.config.codexAppSyncOnTurnComplete) {
+            const revealError = await this.tryRevealThread(active.scopeId, active.threadId, 'turn-complete');
+            if (revealError) {
+              this.logger.warn('codex.reveal_thread_failed', {
+                scopeId: active.scopeId,
+                threadId: active.threadId,
+                reason: 'turn-complete',
+                error: revealError,
+              });
+            }
+          }
+        } finally {
+          active.resolver();
+          this.activeTurns.delete(active.turnId);
+          this.updateStatus();
+        }
+        return;
+      }
     }
   }
 
@@ -957,6 +965,7 @@ export class BridgeController {
     try {
       await this.app.respond(approval.serverRequestId, { decision: 'decline' });
       this.store.markApprovalResolved(localId);
+      await this.clearPendingApprovalStatus(approval.threadId, approval.kind);
       const locale = this.localeForChat(approval.chatId);
       if (approval.messageId !== null) {
         await this.editMessage(approval.chatId, approval.messageId, renderApprovalMessage(locale, approval, 'deny'));
@@ -1364,6 +1373,7 @@ export class BridgeController {
     active: ActiveTurn,
     options: { forceStatus?: boolean; forceStream?: boolean } = {},
   ): Promise<void> {
+    this.clearRenderRetry(active);
     active.renderRequested = true;
     active.forceStatusFlush = active.forceStatusFlush || Boolean(options.forceStatus);
     active.forceStreamFlush = active.forceStreamFlush || Boolean(options.forceStream);
@@ -1388,9 +1398,12 @@ export class BridgeController {
   }
 
   private async syncTurnStatus(active: ActiveTurn, force: boolean): Promise<void> {
-    if (active.pendingArchivedStatusText) {
-      await this.archiveStatusMessage(active, active.pendingArchivedStatusText);
-      active.pendingArchivedStatusText = null;
+    if (active.pendingArchivedStatus) {
+      const archived = await this.archiveStatusMessage(active, active.pendingArchivedStatus);
+      if (!archived) {
+        return;
+      }
+      active.pendingArchivedStatus = null;
     }
 
     const text = this.renderActiveStatus(active);
@@ -1411,71 +1424,13 @@ export class BridgeController {
     }
 
     active.lastStreamFlushAt = now;
-    for (const segment of active.segments) {
-      const chunks = chunkTelegramStreamMessage(segment.text);
-      let index = 0;
-      while (index < chunks.length) {
-        const chunk = chunks[index]!;
-        const existing = segment.messages[index];
-        if (!existing) {
-          try {
-            const messageId = await this.sendMessage(active.scopeId, chunk);
-            segment.messages.push({ messageId, text: chunk });
-            active.statusNeedsRebase = true;
-          } catch (error) {
-            this.logger.warn('telegram.stream_send_failed', {
-              error: String(error),
-              turnId: active.turnId,
-              itemId: segment.itemId,
-              chunkIndex: index,
-            });
-            return;
-          }
-          index += 1;
-          continue;
-        }
-        if (existing.text === chunk) {
-          index += 1;
-          continue;
-        }
-        try {
-          await this.editMessage(active.scopeId, existing.messageId, chunk);
-          existing.text = chunk;
-          index += 1;
-        } catch (error) {
-          if (isTelegramMessageGone(error)) {
-            segment.messages.splice(index);
-            continue;
-          }
-          this.logger.warn('telegram.stream_edit_failed', {
-            error: String(error),
-            turnId: active.turnId,
-            itemId: segment.itemId,
-            messageId: existing.messageId,
-            chunkIndex: index,
-          });
-          return;
-        }
-      }
+    if (active.renderRoute.currentRenderer === 'draft_stream') {
+      await this.syncDraftTurnStream(active, force);
+      return;
+    }
 
-      while (segment.messages.length > chunks.length) {
-        const stale = segment.messages.pop();
-        if (!stale) {
-          break;
-        }
-        try {
-          await this.deleteMessage(active.scopeId, stale.messageId);
-        } catch (error) {
-          if (!isTelegramMessageGone(error)) {
-            this.logger.warn('telegram.stream_delete_failed', {
-              error: String(error),
-              turnId: active.turnId,
-              itemId: segment.itemId,
-              messageId: stale.messageId,
-            });
-          }
-        }
-      }
+    for (const segment of active.segments) {
+      await this.syncSegmentTimeline(active, segment);
     }
   }
 
@@ -1484,7 +1439,7 @@ export class BridgeController {
       await this.retirePreviewMessage(
         preview.scopeId,
         preview.messageId,
-        t(this.localeForChat(preview.scopeId), 'stale_preview_expired'),
+        t(this.localeForChat(preview.scopeId), 'stale_preview_restarted', { threadId: preview.threadId }),
         preview.turnId,
       );
     }
@@ -1546,6 +1501,7 @@ export class BridgeController {
     const activeTurns = [...this.activeTurns.values()];
     for (const active of activeTurns) {
       this.clearToolBatchTimer(active.toolBatch);
+      this.clearRenderRetry(active);
       if (active.previewActive) {
         await this.retirePreviewMessage(
           active.scopeId,
@@ -1610,18 +1566,22 @@ export class BridgeController {
     await this.bot.clearMessageInlineKeyboard(target.chatId, messageId);
   }
 
+  private async sendDraft(scopeId: string, draftId: number, text: string): Promise<void> {
+    const target = parseTelegramScopeId(scopeId);
+    await this.bot.sendMessageDraft(target.chatId, draftId, text, target.topicId);
+  }
+
   private renderActiveStatus(active: ActiveTurn): string {
     const locale = this.localeForChat(active.scopeId);
-    if (active.interruptRequested) {
-      return t(locale, 'interrupt_requested_waiting');
-    }
-    if (active.toolBatch) {
-      return formatToolBatchStatus(locale, active.toolBatch.counts, active.toolBatch.actionLines, true);
-    }
-    if (active.reasoningActiveCount > 0) {
-      return locale === 'zh' ? '正在思考...' : 'Thinking...';
-    }
-    return locale === 'zh' ? '正在思考...' : 'Thinking...';
+    return renderActiveTurnStatus(locale, {
+      interruptRequested: active.interruptRequested,
+      pendingApprovalKinds: active.pendingApprovalKinds,
+      toolStatusText: active.toolBatch
+        ? formatToolBatchStatus(locale, active.toolBatch.counts, active.toolBatch.actionLines, true)
+        : null,
+      reasoningActive: active.reasoningActiveCount > 0,
+      hasStreamingReply: this.findStreamingSegment(active) !== null,
+    });
   }
 
   private async dismissTurnPreview(active: ActiveTurn): Promise<void> {
@@ -1655,6 +1615,7 @@ export class BridgeController {
         });
       } catch (error) {
         this.logger.warn('telegram.preview_send_failed', { error: String(error), turnId: active.turnId });
+        this.scheduleRenderRetry(active);
       }
       return;
     }
@@ -1680,7 +1641,9 @@ export class BridgeController {
       active.statusNeedsRebase = false;
       this.store.removeActiveTurnPreview(active.turnId);
       await this.ensureStatusMessage(active, text);
+      return;
     }
+    this.clearRenderRetry(active);
   }
 
   private async rebaseStatusMessage(active: ActiveTurn, text: string): Promise<void> {
@@ -1694,30 +1657,48 @@ export class BridgeController {
     await this.ensureStatusMessage(active, text);
   }
 
-  private async archiveStatusMessage(active: ActiveTurn, text: string): Promise<void> {
+  private async archiveStatusMessage(active: ActiveTurn, content: ArchivedStatusContent): Promise<boolean> {
     if (!active.previewActive) {
       try {
-        await this.sendMessage(active.scopeId, text);
+        if (content.html) {
+          await this.sendHtmlMessage(active.scopeId, content.html);
+        } else {
+          await this.sendMessage(active.scopeId, content.text);
+        }
       } catch (error) {
         this.logger.warn('telegram.preview_archive_send_failed', { error: String(error), turnId: active.turnId });
+        this.scheduleRenderRetry(active);
+        return false;
       }
-      return;
+      return true;
     }
     try {
-      await this.editMessage(active.scopeId, active.previewMessageId, text, []);
-    } catch (error) {
-      if (!isTelegramMessageGone(error)) {
-        this.logger.warn('telegram.preview_archive_failed', {
-          error: String(error),
-          turnId: active.turnId,
-          messageId: active.previewMessageId,
-        });
+      if (content.html) {
+        await this.editHtmlMessage(active.scopeId, active.previewMessageId, content.html, []);
+      } else {
+        await this.editMessage(active.scopeId, active.previewMessageId, content.text, []);
       }
+    } catch (error) {
+      if (isTelegramMessageGone(error)) {
+        active.previewActive = false;
+        active.statusMessageText = null;
+        active.statusNeedsRebase = false;
+        this.store.removeActiveTurnPreview(active.turnId);
+        return this.archiveStatusMessage(active, content);
+      }
+      this.logger.warn('telegram.preview_archive_failed', {
+        error: String(error),
+        turnId: active.turnId,
+        messageId: active.previewMessageId,
+      });
+      this.scheduleRenderRetry(active);
+      return false;
     }
     active.previewActive = false;
     active.statusMessageText = null;
     active.statusNeedsRebase = false;
     this.store.removeActiveTurnPreview(active.turnId);
+    return true;
   }
 
   private noteToolCommandStart(active: ActiveTurn, event: RawExecCommandEvent): void {
@@ -1766,7 +1747,7 @@ export class BridgeController {
         return;
       }
       batch.finalizeTimer = null;
-      current.pendingArchivedStatusText = formatToolBatchStatus(this.localeForChat(current.scopeId), batch.counts, batch.actionLines, false);
+      current.pendingArchivedStatus = renderArchivedToolBatchStatus(this.localeForChat(current.scopeId), batch.counts, batch.actionLines);
       current.toolBatch = null;
       void this.queueTurnRender(current, { forceStatus: true });
     }, 600);
@@ -1778,7 +1759,7 @@ export class BridgeController {
       return;
     }
     this.clearToolBatchTimer(batch);
-    active.pendingArchivedStatusText = formatToolBatchStatus(this.localeForChat(active.scopeId), batch.counts, batch.actionLines, false);
+    active.pendingArchivedStatus = renderArchivedToolBatchStatus(this.localeForChat(active.scopeId), batch.counts, batch.actionLines);
     active.toolBatch = null;
   }
 
@@ -1789,19 +1770,200 @@ export class BridgeController {
     clearTimeout(batch.finalizeTimer);
     batch.finalizeTimer = null;
   }
+
+  private scheduleRenderRetry(active: ActiveTurn, delayMs = 1500): void {
+    if (active.renderRetryTimer) {
+      return;
+    }
+    active.renderRetryTimer = setTimeout(() => {
+      active.renderRetryTimer = null;
+      if (!this.activeTurns.has(active.turnId)) {
+        return;
+      }
+      void this.queueTurnRender(active, { forceStatus: true, forceStream: true });
+    }, delayMs);
+  }
+
+  private clearRenderRetry(active: ActiveTurn): void {
+    if (!active.renderRetryTimer) {
+      return;
+    }
+    clearTimeout(active.renderRetryTimer);
+    active.renderRetryTimer = null;
+  }
+
+  private async notePendingApprovalStatus(threadId: string, kind: PendingApprovalRecord['kind']): Promise<void> {
+    const active = this.findActiveTurnByThreadId(threadId);
+    if (!active) {
+      return;
+    }
+    active.pendingApprovalKinds.add(kind);
+    await this.queueTurnRender(active, { forceStatus: true });
+  }
+
+  private async clearPendingApprovalStatus(threadId: string, kind: PendingApprovalRecord['kind']): Promise<void> {
+    const active = this.findActiveTurnByThreadId(threadId);
+    if (!active) {
+      return;
+    }
+    active.pendingApprovalKinds.delete(kind);
+    await this.queueTurnRender(active, { forceStatus: true });
+  }
+
+  private async syncDraftTurnStream(active: ActiveTurn, force: boolean): Promise<void> {
+    for (const segment of active.segments) {
+      if (!segment.completed) {
+        continue;
+      }
+      await this.syncSegmentTimeline(active, segment);
+    }
+
+    const draftText = this.renderDraftStreamText(active);
+    if (draftText === null) {
+      active.draftText = null;
+      return;
+    }
+    if (!force && draftText === active.draftText) {
+      return;
+    }
+    if (!active.draftId) {
+      active.draftId = crypto.randomInt(1, 2_147_483_647);
+    }
+    try {
+      await this.sendDraft(active.scopeId, active.draftId, draftText);
+      active.draftText = draftText;
+      active.statusNeedsRebase = true;
+    } catch (error) {
+      this.logger.warn('telegram.draft_send_failed', {
+        error: String(error),
+        turnId: active.turnId,
+        draftId: active.draftId,
+      });
+      this.scheduleRenderRetry(active);
+    }
+  }
+
+  private renderDraftStreamText(active: ActiveTurn): string | null {
+    const locale = this.localeForChat(active.scopeId);
+    const streamingSegment = this.findStreamingSegment(active);
+    if (streamingSegment) {
+      return clipTelegramDraftMessage(streamingSegment.text, t(locale, 'working'));
+    }
+    if (active.toolBatch) {
+      return clipTelegramDraftMessage(
+        formatToolBatchStatus(locale, active.toolBatch.counts, active.toolBatch.actionLines, true),
+        t(locale, 'working'),
+      );
+    }
+    if (active.reasoningActiveCount > 0 || active.interruptRequested) {
+      return clipTelegramDraftMessage(this.renderActiveStatus(active), t(locale, 'working'));
+    }
+    return null;
+  }
+
+  private findStreamingSegment(active: ActiveTurn): ActiveTurnSegment | null {
+    return [...active.segments].reverse().find(segment => !segment.completed && segment.text.trim()) ?? null;
+  }
+
+  private findActiveTurnByThreadId(threadId: string): ActiveTurn | null {
+    for (const active of this.activeTurns.values()) {
+      if (active.threadId === threadId) {
+        return active;
+      }
+    }
+    return null;
+  }
+
+  private async syncSegmentTimeline(active: ActiveTurn, segment: ActiveTurnSegment): Promise<void> {
+    const chunks = chunkTelegramStreamMessage(segment.text);
+    let index = 0;
+    while (index < chunks.length) {
+      const chunk = chunks[index]!;
+      const existing = segment.messages[index];
+      if (!existing) {
+        try {
+          const messageId = await this.sendMessage(active.scopeId, chunk);
+          segment.messages.push({ messageId, text: chunk });
+          active.statusNeedsRebase = true;
+        } catch (error) {
+          this.logger.warn('telegram.stream_send_failed', {
+            error: String(error),
+            turnId: active.turnId,
+            itemId: segment.itemId,
+            chunkIndex: index,
+          });
+          this.scheduleRenderRetry(active);
+          return;
+        }
+        index += 1;
+        continue;
+      }
+      if (existing.text === chunk) {
+        index += 1;
+        continue;
+      }
+      try {
+        await this.editMessage(active.scopeId, existing.messageId, chunk);
+        existing.text = chunk;
+        index += 1;
+      } catch (error) {
+        if (isTelegramMessageGone(error)) {
+          segment.messages.splice(index);
+          continue;
+        }
+        this.logger.warn('telegram.stream_edit_failed', {
+          error: String(error),
+          turnId: active.turnId,
+          itemId: segment.itemId,
+          messageId: existing.messageId,
+          chunkIndex: index,
+        });
+        this.scheduleRenderRetry(active);
+        return;
+      }
+    }
+
+    while (segment.messages.length > chunks.length) {
+      const stale = segment.messages.pop();
+      if (!stale) {
+        break;
+      }
+      try {
+        await this.deleteMessage(active.scopeId, stale.messageId);
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.stream_delete_failed', {
+            error: String(error),
+            turnId: active.turnId,
+            itemId: segment.itemId,
+            messageId: stale.messageId,
+          });
+        }
+      }
+    }
+  }
 }
 
-function ensureTurnSegment(active: ActiveTurn, itemId: string, phase?: string | null): ActiveTurnSegment {
+function ensureTurnSegment(
+  active: ActiveTurn,
+  itemId: string,
+  phase?: string | null,
+  outputKind?: TurnOutputKind,
+): ActiveTurnSegment {
   let segment = active.segments.find((entry) => entry.itemId === itemId);
   if (segment) {
     if (phase !== undefined) {
       segment.phase = phase;
+    }
+    if (outputKind !== undefined) {
+      segment.outputKind = outputKind;
     }
     return segment;
   }
   segment = {
     itemId,
     phase: phase ?? null,
+    outputKind: outputKind ?? 'commentary',
     text: '',
     completed: false,
     messages: [],
@@ -1836,6 +1998,24 @@ function formatToolBatchStatus(
     return heading;
   }
   return [heading, ...detailLines].join('\n');
+}
+
+function renderArchivedToolBatchStatus(
+  locale: AppLocale,
+  counts: ToolBatchCounts,
+  actionLines: string[],
+): ArchivedStatusContent {
+  const text = formatToolBatchStatus(locale, counts, actionLines, false);
+  if (actionLines.length === 0) {
+    return { text, html: null };
+  }
+  const heading = formatToolBatchHeading(locale, counts, false);
+  const detailLines = actionLines.slice(0, 12).map(line => escapeTelegramHtml(line));
+  const html = [
+    `<b>${escapeTelegramHtml(heading)}</b>`,
+    `<blockquote expandable>${detailLines.join('\n')}</blockquote>`,
+  ].join('\n');
+  return { text, html };
 }
 
 function formatToolBatchHeading(locale: AppLocale, counts: ToolBatchCounts, inProgress: boolean): string {
@@ -1933,57 +2113,38 @@ function describeParsedCommand(entry: any): ToolDescriptor | null {
     case 'write':
     case 'edit':
     case 'apply_patch':
-    case 'move':
-    case 'copy':
-    case 'delete':
-    case 'mkdir':
       return {
         kind: 'edits',
         key: `${type}:${path ?? 'workspace'}`,
         line: `Edited ${path ?? 'files'}`,
       };
+    case 'move':
+      return {
+        kind: 'edits',
+        key: `${type}:${path ?? 'workspace'}`,
+        line: `Moved ${path ?? 'files'}`,
+      };
+    case 'copy':
+      return {
+        kind: 'edits',
+        key: `${type}:${path ?? 'workspace'}`,
+        line: `Copied ${path ?? 'files'}`,
+      };
+    case 'delete':
+      return {
+        kind: 'edits',
+        key: `${type}:${path ?? 'workspace'}`,
+        line: `Deleted ${path ?? 'files'}`,
+      };
+    case 'mkdir':
+      return {
+        kind: 'edits',
+        key: `${type}:${path ?? 'workspace'}`,
+        line: `Created ${path ?? 'files'}`,
+      };
     default:
       return null;
   }
-}
-
-function extractRawExecCommandEvent(params: any): RawExecCommandEvent | null {
-  const msg = params?.msg;
-  if (!msg || typeof msg !== 'object') {
-    return null;
-  }
-  const callId = typeof msg.call_id === 'string' ? msg.call_id : null;
-  const turnId = typeof msg.turn_id === 'string' ? msg.turn_id : null;
-  if (!callId || !turnId) {
-    return null;
-  }
-  return {
-    callId,
-    turnId,
-    command: Array.isArray(msg.command) ? msg.command.map((entry: unknown) => String(entry)) : [],
-    cwd: msg.cwd ? String(msg.cwd) : null,
-    parsedCmd: Array.isArray(msg.parsed_cmd) ? msg.parsed_cmd : [],
-  };
-}
-
-function extractItemId(value: any): string | null {
-  const candidates = [
-    value?.itemId,
-    value?.item_id,
-    value?.id,
-    value?.item?.id,
-  ];
-  for (const candidate of candidates) {
-    if (candidate !== null && candidate !== undefined && String(candidate).trim()) {
-      return String(candidate);
-    }
-  }
-  return null;
-}
-
-function extractAgentPhase(value: any): string | null {
-  const phase = value?.phase ?? value?.item?.phase ?? null;
-  return typeof phase === 'string' && phase.trim() ? phase : null;
 }
 
 function compactPath(value: unknown): string | null {
@@ -2005,6 +2166,13 @@ function truncateInline(value: string, limit: number): string {
     return value;
   }
   return `${value.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function escapeTelegramHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }
 
 function approvalKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {
@@ -2087,89 +2255,4 @@ function isTelegramMessageGone(error: unknown): boolean {
   return message.includes('message to delete not found')
     || message.includes('message to edit not found')
     || message.includes('message not found');
-}
-
-function extractTurnId(params: any): string | null {
-  const candidates = [
-    params?.turnId,
-    params?.turn_id,
-    params?.turn?.id,
-    params?.turn?.turnId,
-    params?.item?.turnId,
-    params?.item?.turn_id,
-  ];
-  for (const candidate of candidates) {
-    if (candidate !== null && candidate !== undefined && String(candidate).trim()) {
-      return String(candidate);
-    }
-  }
-  return null;
-}
-
-function extractAgentDeltaText(params: any): string | null {
-  const candidates = [
-    params?.delta,
-    params?.textDelta,
-    params?.contentDelta,
-    params?.text,
-  ];
-  for (const candidate of candidates) {
-    const text = extractTextCandidate(candidate);
-    if (text) {
-      return text;
-    }
-  }
-  return null;
-}
-
-function extractCompletedAgentText(params: any): string | null {
-  const itemType = normalizeEventItemType(params?.item ?? params);
-  if (itemType !== 'agentmessage' && itemType !== 'assistantmessage') {
-    return null;
-  }
-  const item = params?.item ?? params;
-  const directText = extractTextCandidate(item?.text)
-    ?? extractTextCandidate(item?.content)
-    ?? extractTextCandidate(item?.value);
-  if (directText !== null) {
-    return directText;
-  }
-  return '';
-}
-
-function normalizeEventItemType(value: any): string | null {
-  const raw = value?.type ?? value?.itemType ?? value?.item_type ?? value?.kind;
-  if (typeof raw !== 'string') {
-    return null;
-  }
-  return raw.replace(/[^a-z]/gi, '').toLowerCase();
-}
-
-function extractTextCandidate(value: any): string | null {
-  if (typeof value === 'string') {
-    return value;
-  }
-  if (!value || typeof value !== 'object') {
-    return null;
-  }
-  for (const key of ['text', 'delta', 'content', 'value']) {
-    const candidate = value[key];
-    if (typeof candidate === 'string') {
-      return candidate;
-    }
-  }
-  for (const key of ['parts', 'segments', 'content']) {
-    const candidate = value[key];
-    if (!Array.isArray(candidate)) {
-      continue;
-    }
-    const text = candidate
-      .map((entry) => extractTextCandidate(entry))
-      .filter((entry): entry is string => entry !== null)
-      .join('');
-    if (text) {
-      return text;
-    }
-  }
-  return null;
 }

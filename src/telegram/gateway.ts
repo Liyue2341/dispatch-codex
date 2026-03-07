@@ -142,6 +142,24 @@ export class TelegramGateway extends EventEmitter {
     return this.sendMessageWithOptions(chatId, text, inlineKeyboard, 'HTML', messageThreadId);
   }
 
+  async sendMessageDraft(
+    chatId: string,
+    draftId: number,
+    text: string,
+    messageThreadId?: number | null,
+  ): Promise<void> {
+    const result = await callTelegramApi<boolean>(this.botToken, 'sendMessageDraft', {
+      chat_id: chatId,
+      draft_id: draftId,
+      text,
+      ...(messageThreadId !== null && messageThreadId !== undefined ? { message_thread_id: messageThreadId } : {}),
+      disable_web_page_preview: true,
+    });
+    if (!result.ok) {
+      throw new Error(result.description || 'Failed to send Telegram draft message');
+    }
+  }
+
   async editMessage(chatId: string, messageId: number, text: string, inlineKeyboard?: Array<Array<{ text: string; callback_data: string }>>): Promise<void> {
     return this.editMessageWithOptions(chatId, messageId, text, inlineKeyboard);
   }
