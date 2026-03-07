@@ -1832,7 +1832,6 @@ export class BridgeController {
     try {
       await this.sendDraft(active.scopeId, active.draftId, draftText);
       active.draftText = draftText;
-      active.statusNeedsRebase = true;
     } catch (error) {
       this.logger.warn('telegram.draft_send_failed', {
         error: String(error),
@@ -1848,15 +1847,6 @@ export class BridgeController {
     const streamingSegment = this.findStreamingSegment(active);
     if (streamingSegment) {
       return clipTelegramDraftMessage(streamingSegment.text, t(locale, 'working'));
-    }
-    if (active.toolBatch) {
-      return clipTelegramDraftMessage(
-        formatToolBatchStatus(locale, active.toolBatch.counts, active.toolBatch.actionLines, true),
-        t(locale, 'working'),
-      );
-    }
-    if (active.reasoningActiveCount > 0 || active.interruptRequested) {
-      return clipTelegramDraftMessage(this.renderActiveStatus(active), t(locale, 'working'));
     }
     return null;
   }

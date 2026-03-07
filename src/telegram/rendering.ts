@@ -17,10 +17,13 @@ export interface TelegramRenderRoute {
 export function resolveTelegramRenderRoute(chatType: string, topicId: number | null): TelegramRenderRoute {
   const conversationKind = resolveTelegramConversationKind(chatType, topicId);
   const supportsDraftStreaming = chatType === 'private';
+  const preferredRenderer: TelegramRendererKind = 'segmented_stream';
   return {
     conversationKind,
-    preferredRenderer: supportsDraftStreaming ? 'draft_stream' : 'segmented_stream',
-    currentRenderer: supportsDraftStreaming ? 'draft_stream' : 'segmented_stream',
+    // Telegram draft updates are available in private chats, but segmented live messages
+    // are the more stable default because they do not overwrite visible partial output.
+    preferredRenderer,
+    currentRenderer: preferredRenderer,
     supportsDraftStreaming,
     usesMessageThread: topicId !== null,
   };

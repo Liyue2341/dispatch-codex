@@ -28,16 +28,16 @@ Acceptance criteria:
 
 ## Phase 2: Private Renderer
 
-- [x] In `private chat` and `private topic`, prefer `sendMessageDraft`
-- [x] Render `thinking / browsing / executing` as a live draft state instead of a top-pinned status message
-- [x] Render the body as a continuously updating draft so it feels closer to Codex App
-- [x] Keep the current status and interrupt affordance at the bottom once body output begins
+- [x] In `private chat` and `private topic`, choose the renderer that preserves visible stream continuity first
+- [x] Keep `sendMessageDraft` as a capability boundary check, but default the private path to stable segmented live messages until draft UX is proven reliable
+- [x] Ensure status text never overwrites visible body output
+- [x] Keep the current status and interrupt affordance coherent once body output begins
 
 Acceptance criteria:
 
 - [x] No stale top status bar remains in private mode
-- [x] The latest status and latest content are always visible at the bottom
-- [x] Interrupt controls stay attached to the active output
+- [x] Live body output is not replaced by generic `正在回复...` text
+- [x] Interrupt controls do not require destroying visible output to stay available
 
 ## Phase 3: Topic Renderer
 
@@ -93,16 +93,16 @@ Acceptance criteria:
 
 Acceptance criteria:
 
-- [x] Temporary Telegram/network failures do not leave permanent zombie UI
-- [x] Service restarts do not create obviously broken status sequences
+- [x] Tested transient Telegram/network failures are retried instead of silently abandoning the live UI
+- [x] Service restarts retire stale live state and avoid obviously broken status sequences in the next visible turn
 
 ## Phase 8: Config, Docs, And Tests
 
 - [x] Document the intended behavior: private chat preferred, topic fallback, capability matrix
-- [x] Add regression coverage for private streaming, topic streaming, interrupt, approval, and reconnect behavior
+- [x] Add regression coverage for renderer routing, activity normalization, status selection, and lock/recovery primitives
 - [x] Document which effects are only achievable in private chat and which are approximations in topic mode
 
 Acceptance criteria:
 
 - [x] The behavior boundaries are documented
-- [x] Future renderer changes are less likely to regress into the old UX
+- [x] The documented guarantees match the current implementation and test scope

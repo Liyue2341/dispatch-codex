@@ -2,23 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveTelegramRenderRoute } from './rendering.js';
 
-test('private chat prefers draft streaming while keeping segmented fallback for now', () => {
+test('private chat keeps draft capability but defaults to segmented streaming for stability', () => {
   const route = resolveTelegramRenderRoute('private', null);
   assert.deepEqual(route, {
     conversationKind: 'private_chat',
-    preferredRenderer: 'draft_stream',
-    currentRenderer: 'draft_stream',
+    preferredRenderer: 'segmented_stream',
+    currentRenderer: 'segmented_stream',
     supportsDraftStreaming: true,
     usesMessageThread: false,
   });
 });
 
-test('private topic still routes as private and keeps thread metadata', () => {
+test('private topic keeps thread metadata while using the stable segmented renderer', () => {
   const route = resolveTelegramRenderRoute('private', 9);
   assert.deepEqual(route, {
     conversationKind: 'private_topic',
-    preferredRenderer: 'draft_stream',
-    currentRenderer: 'draft_stream',
+    preferredRenderer: 'segmented_stream',
+    currentRenderer: 'segmented_stream',
     supportsDraftStreaming: true,
     usesMessageThread: true,
   });

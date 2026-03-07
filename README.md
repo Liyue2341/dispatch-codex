@@ -11,7 +11,7 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 - Deep-link sync from Telegram into `Codex.app` with `/open` and `/reveal`
 - Inline approval buttons for command and file-change approvals
 - SQLite persistence for bindings, offsets, approvals, and audit logs
-- Private-chat draft streaming with topic/group fallback rendering
+- Stable segmented live rendering across private chat and topic/group modes
 - Bottom activity cards for `thinking`, `browsing`, `approval`, `interrupt`, and tool summaries
 - Single-instance process lock to prevent duplicate Telegram polling on the same bot token
 
@@ -35,7 +35,7 @@ npm run serve
 
 ## Codex Skill
 
-This repo also ships a Codex skill at [skills/chat-to-codex](/Users/ganxing/Downloads/telegram-codex-app-bridge/skills/chat-to-codex).
+This repo also ships a Codex skill at [`skills/chat-to-codex`](./skills/chat-to-codex).
 
 Use it when you want Codex to:
 
@@ -60,14 +60,14 @@ The bridge intentionally uses different Telegram renderers depending on the conv
 
 | Conversation type | Renderer | Notes |
 | --- | --- | --- |
-| Private chat | `sendMessageDraft` + bottom status card | Best experience; closest to Codex App |
-| Private chat topic | `sendMessageDraft` + bottom status card | Same as private chat, but with `message_thread_id` |
+| Private chat | Segmented live messages + bottom status card | Default stable renderer; keeps partial output visible |
+| Private chat topic | Segmented live messages + bottom status card | Same as private chat, but with `message_thread_id` |
 | Group topic | Segmented messages + bottom status card | Fallback mode; no draft streaming |
 | Group chat without topic | Segmented messages + bottom status card | Supported, but less structured than topic mode |
 
 Practical guidance:
 
-- Prefer private chat if you want the closest Codex App feel.
+- Prefer private chat if you want the simplest and most stable live experience.
 - Prefer one bot per topic if you keep multiple bots in the same group.
 - Group/topic mode is a compatibility path, not the richest renderer.
 
@@ -148,14 +148,14 @@ Recommended group behavior:
 
 What is intentionally supported now:
 
-- Private chats stream through Telegram drafts instead of repeatedly rewriting one giant message
+- Private chats and topics use segmented live messages so visible partial output is not overwritten by generic status text
 - Group topics use segmented messages, activity cards, and archived tool summaries
 - Tool actions such as `Read ...`, `Searched for ...`, `Ran ...`, and edit operations are summarized separately from the assistant body
 - Interrupt and approval states are shown as their own activity states instead of being mixed into generic "working" text
 
 What still remains an approximation of Codex App:
 
-- Telegram group topics do not have the same native draft-streaming surface as private chats
+- Telegram does not give this bridge the same native multi-panel surface as Codex App, so activity and body still share one linear chat timeline
 - If Telegram or the network briefly fails, the bridge retries rendering, but the UI can still be less fluid than Codex App
 - A bridge restart can retire stale live cards and preserve thread context, but it cannot reconstruct every in-flight delta exactly
 
@@ -204,7 +204,7 @@ Common issues:
 - A message seemed to get no reply:
   Check the latest activity card and streamed body below it. Private chat uses live drafts; topic/group mode uses segmented reply messages.
 
-See [`.env.example`](/Users/ganxing/Downloads/telegram-codex-app-bridge/.env.example) for the full list.
+See [`.env.example`](./.env.example) for the full list.
 
 ## Operations
 
