@@ -7,3 +7,5 @@ coverage/
 .runtime/
 .telegram-inbox/
 tmp/
+__pycache__/
+*.pyc

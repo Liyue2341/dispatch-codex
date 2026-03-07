@@ -25,9 +25,10 @@ async function main(): Promise<void> {
   }
 
   if (command === 'doctor') {
+    const configuredCodexBin = process.env.CODEX_CLI_BIN;
     const checks = [
       ['node >= 24', Number(process.versions.node.split('.')[0]) >= 24],
-      ['codex cli available', hasCommand('codex')],
+      ['codex cli available', hasConfiguredCodexBin(configuredCodexBin) || hasCommand('codex')],
       ['telegram bot token configured', Boolean(process.env.TG_BOT_TOKEN)],
       ['telegram allowed user configured', Boolean(process.env.TG_ALLOWED_USER_ID)],
     ];
@@ -110,6 +111,16 @@ function hasCommand(commandName: string): boolean {
     const which = process.platform === 'win32' ? 'where' : 'which';
     const result = spawnSync(which, [commandName], { stdio: 'ignore' });
     return result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function hasConfiguredCodexBin(binPath: string | undefined): boolean {
+  if (!binPath || !binPath.trim()) return false;
+  try {
+    fs.accessSync(binPath, fs.constants.X_OK);
+    return true;
   } catch {
     return false;
   }

@@ -31,6 +31,17 @@ npm run doctor
 npm run serve
 ```
 
+## Codex Skill
+
+This repo also ships a Codex skill at [skills/chat-to-codex](/Users/ganxing/Downloads/telegram-codex-app-bridge/skills/chat-to-codex).
+
+Use it when you want Codex to:
+
+- bootstrap this bridge on the current Mac
+- copy the same setup to another Mac over SSH
+- install Node.js 24 and the Codex CLI without relying on Homebrew
+- write the bridge `.env`, build the repo, run doctor, and optionally install launchd
+
 ## Telegram Setup
 
 1. Create a bot with `@BotFather` and copy the bot token into `TG_BOT_TOKEN`.
