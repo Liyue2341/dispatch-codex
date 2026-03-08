@@ -1,23 +1,12 @@
 import { spawn } from 'node:child_process';
-
-export interface OpenUrlCommand {
-  command: string;
-  args: string[];
-}
+import { getOpenUrlCommand as getPlatformOpenUrlCommand, type OpenUrlCommand } from '../platform/capabilities.js';
 
 export function buildThreadDeepLink(threadId: string): string {
   return `codex://threads/${encodeURIComponent(threadId)}`;
 }
 
 export function getOpenUrlCommand(url: string, platform: NodeJS.Platform = process.platform): OpenUrlCommand {
-  switch (platform) {
-    case 'darwin':
-      return { command: 'open', args: [url] };
-    case 'win32':
-      return { command: 'cmd', args: ['/c', 'start', '', url] };
-    default:
-      return { command: 'xdg-open', args: [url] };
-  }
+  return getPlatformOpenUrlCommand(url, platform);
 }
 
 export async function openUrl(url: string, platform: NodeJS.Platform = process.platform): Promise<void> {

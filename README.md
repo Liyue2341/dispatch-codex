@@ -1,6 +1,6 @@
 # telegram-codex-app-bridge
 
-Use a Telegram bot to control a local Codex Desktop instance through `codex app-server`.
+Use a Telegram bot to control a local Codex host through `codex app-server`.
 
 ## Features
 
@@ -9,7 +9,7 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 - Sticky chat-to-thread binding with `/threads`, `/open`, `/new`, `/where`, `/interrupt`
 - Chat-scoped model and reasoning-effort control with `/models` and optional `/model`/`/effort` aliases
 - Chat-scoped access presets with `/permissions` and optional `/access` alias
-- Deep-link sync from Telegram into `Codex.app` with `/open` and `/reveal`
+- Deep-link sync into the local Codex desktop host with `/open` and `/reveal` when the host supports it
 - Inline approval buttons for command and file-change approvals
 - SQLite persistence for bindings, offsets, approvals, and audit logs
 - Stable segmented live rendering across private chat and topic/group modes
@@ -18,13 +18,24 @@ Use a Telegram bot to control a local Codex Desktop instance through `codex app-
 
 ## Requirements
 
-- macOS with Codex Desktop installed
+- macOS or Linux
 - `codex` CLI available and authenticated
 - Node.js 24+
 - A Telegram bot token from `@BotFather`
 - Your Telegram numeric user id
 
+Notes:
+
+- The bridge core runs through `codex app-server`.
+- `/open` and `/reveal` are best-effort desktop features and depend on the current host's desktop-open capability.
+
 ## Setup
+
+1. Install dependencies and write `.env`.
+2. Build the bridge.
+3. Choose either a foreground run or a host-native user service.
+
+Foreground run:
 
 ```bash
 npm install
@@ -34,16 +45,28 @@ npm run doctor
 npm run serve
 ```
 
+Host-native user service:
+
+- macOS: `./scripts/service/install.sh` installs a user `launchd` agent
+- Linux: `./scripts/service/install.sh` installs a user `systemd` unit
+
+After install, use:
+
+```bash
+./scripts/service/status.sh
+./scripts/service/logs.sh
+```
+
 ## Codex Skill
 
 This repo also ships a Codex skill at [`skills/chat-to-codex`](./skills/chat-to-codex).
 
 Use it when you want Codex to:
 
-- bootstrap this bridge on the current Mac
-- copy the same setup to another Mac over SSH
-- install Node.js 24 and the Codex CLI without relying on Homebrew
-- write the bridge `.env`, build the repo, run doctor, and optionally install launchd
+- bootstrap this bridge on the current macOS or Linux host
+- copy the same setup to another host over SSH
+- install Node.js 24 and the Codex CLI
+- write the bridge `.env`, build the repo, run doctor, and optionally install the host-native user service
 
 ## Telegram Setup
 
@@ -81,14 +104,16 @@ TG_BOT_TOKEN=123456:telegram-token
 TG_ALLOWED_USER_ID=123456789
 TG_ALLOWED_CHAT_ID=
 TG_ALLOWED_TOPIC_ID=
-CODEX_APP_AUTOLAUNCH=true
-CODEX_APP_LAUNCH_CMD=codex app
+CODEX_APP_AUTOLAUNCH=false
+CODEX_APP_LAUNCH_CMD=
 CODEX_APP_SYNC_ON_OPEN=true
 CODEX_APP_SYNC_ON_TURN_COMPLETE=false
-DEFAULT_CWD=/Users/ganxing/Downloads
+DEFAULT_CWD=/absolute/path/to/workspace
 DEFAULT_APPROVAL_POLICY=on-request
 DEFAULT_SANDBOX_MODE=workspace-write
 ```
+
+Keep `CODEX_APP_AUTOLAUNCH=false` unless you have a known-good desktop launch command for that host.
 
 How the optional Telegram fields work:
 
@@ -183,11 +208,11 @@ TG_BOT_TOKEN=123456:telegram-token
 TG_ALLOWED_USER_ID=123456789
 TG_ALLOWED_CHAT_ID=-1001234567890
 TG_ALLOWED_TOPIC_ID=42
-CODEX_APP_AUTOLAUNCH=true
-CODEX_APP_LAUNCH_CMD=codex app
+CODEX_APP_AUTOLAUNCH=false
+CODEX_APP_LAUNCH_CMD=
 CODEX_APP_SYNC_ON_OPEN=true
 CODEX_APP_SYNC_ON_TURN_COMPLETE=false
-DEFAULT_CWD=/Users/ganxing/Downloads
+DEFAULT_CWD=/absolute/path/to/workspace
 DEFAULT_APPROVAL_POLICY=on-request
 DEFAULT_SANDBOX_MODE=workspace-write
 ```
@@ -217,7 +242,9 @@ See [`.env.example`](./.env.example) for the full list.
 npm run build
 ./scripts/doctor.sh
 ./scripts/status.sh
-./scripts/launchd/install.sh
+./scripts/service/install.sh
+./scripts/service/status.sh
+./scripts/service/logs.sh
 ```
 
 ## Contributing

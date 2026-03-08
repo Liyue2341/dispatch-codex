@@ -11,6 +11,7 @@ import type {
   ThreadSessionState,
   ThreadStatusKind,
 } from '../types.js';
+import { getDesktopOpenSupport } from '../platform/capabilities.js';
 import { buildThreadDeepLink, openUrl } from './deeplink.js';
 
 interface JsonRpcResponse {
@@ -85,6 +86,7 @@ export class CodexAppClient extends EventEmitter {
     private readonly launchCommand: string,
     private readonly autolaunch: boolean,
     private readonly logger: Logger,
+    private readonly platform: NodeJS.Platform = process.platform,
   ) {
     super();
   }
@@ -205,8 +207,12 @@ export class CodexAppClient extends EventEmitter {
   }
 
   async revealThread(threadId: string): Promise<void> {
+    const desktopOpen = getDesktopOpenSupport(this.platform);
+    if (!desktopOpen.available) {
+      throw new Error(desktopOpen.reason || 'desktop open is unavailable on this host');
+    }
     const url = buildThreadDeepLink(threadId);
-    await openUrl(url);
+    await openUrl(url, this.platform);
   }
 
   async respond(requestId: string | number, result: unknown): Promise<void> {
@@ -218,9 +224,11 @@ export class CodexAppClient extends EventEmitter {
   }
 
   private async startServer(): Promise<void> {
-    if (this.autolaunch) {
+    if (this.autolaunch && this.launchCommand.trim()) {
       const launcher = spawn(this.launchCommand, { shell: true, detached: true, stdio: 'ignore' });
       launcher.unref();
+    } else if (this.autolaunch) {
+      this.logger.warn('codex.desktop_autolaunch_skipped', { reason: 'no launch command configured' });
     }
     this.port = await reservePort();
     this.child = spawn(this.codexCliBin, ['app-server', '--listen', `ws://127.0.0.1:${this.port}`], {

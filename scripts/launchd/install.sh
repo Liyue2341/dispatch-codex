@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "launchd install is only supported on macOS" >&2
+  exit 1
+fi
 PLIST="$HOME/Library/LaunchAgents/com.ganxing.telegram-codex-app-bridge.plist"
 NODE_BIN="$(command -v node)"
 PATH_VALUE="$PATH"

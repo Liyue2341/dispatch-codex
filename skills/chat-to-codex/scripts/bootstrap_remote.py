@@ -8,7 +8,7 @@ import sys
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run chat-to-codex bootstrap on a remote Mac over SSH.")
+    parser = argparse.ArgumentParser(description="Run chat-to-codex bootstrap on a remote host over SSH.")
     parser.add_argument("--ssh-host", required=True)
     parser.add_argument("--repo-url", default="https://github.com/Gan-Xing/telegram-codex-app-bridge.git")
     parser.add_argument("--repo-ref", default="main")

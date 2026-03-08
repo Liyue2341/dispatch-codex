@@ -1,7 +1,7 @@
 {
   "name": "telegram-codex-app-bridge",
   "version": "0.1.0",
-  "description": "Bridge a Telegram bot to a local Codex Desktop instance via codex app-server.",
+  "description": "Bridge a Telegram bot to a local Codex host via codex app-server.",
   "type": "module",
   "private": false,
   "repository": {

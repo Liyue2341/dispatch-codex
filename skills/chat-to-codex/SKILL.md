@@ -1,11 +1,11 @@
 ---
 name: chat-to-codex
-description: Deploy, configure, and validate the Gan-Xing Telegram-to-Codex bridge on macOS, locally or over SSH. Use when Codex needs to clone or update the bridge repo, collect Telegram bot and chat/topic values, write the bridge `.env`, enable a launchd service, and guide the user through the first Telegram message test. Trigger on requests about Telegram bots controlling Codex, copying the bridge to another Mac, remote bridge deployment, or turning this repo into an installable Codex skill.
+description: Deploy, configure, and validate the Gan-Xing Telegram-to-Codex bridge on macOS or Linux, locally or over SSH. Use when Codex needs to clone or update the bridge repo, collect Telegram bot and chat/topic values, write the bridge `.env`, enable the host-native user service, and guide the user through the first Telegram message test. Trigger on requests about Telegram bots controlling Codex, copying the bridge to another host, remote bridge deployment, or turning this repo into an installable Codex skill.
 ---
 
 # Chat To Codex
 
-Deploy the Telegram Codex bridge to a Mac with as little manual setup as possible. The bundled scripts install user-scoped Node.js and Codex CLI when missing, clone or update the bridge repo, write `.env`, build the project, run doctor checks, and optionally install the launchd service.
+Deploy the Telegram Codex bridge to a macOS or Linux host with as little manual setup as possible. The bundled scripts install user-scoped Node.js and Codex CLI when missing, clone or update the bridge repo, write `.env`, build the project, run doctor checks, and optionally install the host-native user service.
 
 This skill is not finished when the repo is merely installed. Treat a bridge setup as complete only after:
 
@@ -19,7 +19,7 @@ This skill is not finished when the repo is merely installed. Treat a bridge set
 
 Follow this order every time:
 
-1. Decide whether this is a local Mac install or a remote Mac over SSH.
+1. Decide whether this is a local host install or a remote host over SSH.
 2. Confirm where the bridge repo should live. If the repo is not already present, clone it or let bootstrap clone it.
 3. Decide the Telegram mode before writing `.env`:
    - private chat only
@@ -68,11 +68,11 @@ If `TG_ALLOWED_CHAT_ID` or `TG_ALLOWED_TOPIC_ID` is missing, read [references/te
 
 ## Deployment Rules
 
-1. If the user is deploying to a second Mac, prefer one bot per device.
-2. If no unique bot token has been provided for the second Mac, bootstrap with `--no-start`.
+1. If the user is deploying to a second host, prefer one bot per device.
+2. If no unique bot token has been provided for the second host, bootstrap with `--no-start`.
 3. If group or topic mode is involved, read [references/telegram-setup.md](./references/telegram-setup.md) before continuing.
 4. Always explain to the user which values will be written into `.env` before starting bootstrap.
-5. After bootstrap, check `codex login status`. If authentication is missing, tell the user to run `codex login` or open `codex app` on that Mac.
+5. After bootstrap, check `codex login status`. If authentication is missing, tell the user to run `codex login` on that host.
 6. If the user only says "set it up" and has not given all required values, ask for the missing values directly instead of guessing Telegram IDs.
 7. If the user wants a fully usable setup, continue until first-message validation is done or clearly blocked by Telegram-side prerequisites.
 
@@ -80,7 +80,7 @@ If `TG_ALLOWED_CHAT_ID` or `TG_ALLOWED_TOPIC_ID` is missing, read [references/te
 
 Use short direct questions when values are missing. The minimum useful checklist is:
 
-1. Where should the repo live on the target Mac?
+1. Where should the repo live on the target host?
 2. Which directory should be the bridge's default working directory?
 3. What is the Telegram bot token?
 4. What is the Telegram numeric user id allowed to control the bridge?
@@ -125,14 +125,14 @@ python3 "$CODEX_HOME/skills/chat-to-codex/scripts/bootstrap_remote.py" \
   --default-sandbox-mode "workspace-write"
 ```
 
-Use `--no-start` by default when preparing a second Mac before a unique bot token is ready.
+Use `--no-start` by default when preparing a second host before a unique bot token is ready.
 
 ## Validation
 
 After either bootstrap path:
 
 1. Run `node dist/main.js doctor` in the installed bridge repo.
-2. If launchd was installed, run `node dist/main.js status`.
+2. If the user service was installed, run `./scripts/service/status.sh`.
 3. Check `codex login status`. If authentication is missing, stop and tell the user exactly how to log in.
 4. If the bridge is expected to answer in a Telegram group, confirm:
    - `privacy mode` is disabled
@@ -150,7 +150,7 @@ Do this whenever the bridge has been started:
    - topic mode: send `/help` inside the configured topic, then send one plain-language message
 2. After the user sends that message, verify the bridge is listening:
    - `node dist/main.js status`
-   - launchd or service log if there is no reply
+   - `./scripts/service/logs.sh` or the host service log if there is no reply
 3. If the bot still does not answer, debug the Telegram side before changing the bridge:
    - wrong bot token
    - wrong user id
@@ -163,5 +163,5 @@ Do not describe the setup as "done" until this smoke test has either passed or b
 ## Resources
 
 - [references/telegram-setup.md](./references/telegram-setup.md): Telegram-side checklist and ID discovery
-- `scripts/bootstrap_host.py`: install and configure the bridge on the current Mac
-- `scripts/bootstrap_remote.py`: run the same bootstrap on another Mac over SSH
+- `scripts/bootstrap_host.py`: install and configure the bridge on the current host
+- `scripts/bootstrap_remote.py`: run the same bootstrap on another host over SSH

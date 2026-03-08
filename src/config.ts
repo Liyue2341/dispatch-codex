@@ -4,6 +4,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import dotenv from 'dotenv';
 import type { LogLevel } from './logger.js';
+import { detectPlatformCapabilities, getCommandLookupProgram } from './platform/capabilities.js';
 import type { ApprovalPolicyValue, SandboxModeValue } from './types.js';
 
 export const APP_HOME = path.join(os.homedir(), '.telegram-codex-app-bridge');
@@ -37,14 +38,15 @@ export interface AppConfig {
 
 export function loadConfig(): AppConfig {
   dotenv.config();
+  const platform = detectPlatformCapabilities();
   const config: AppConfig = {
     tgBotToken: required('TG_BOT_TOKEN'),
     tgAllowedUserId: required('TG_ALLOWED_USER_ID'),
     tgAllowedChatId: optional('TG_ALLOWED_CHAT_ID'),
     tgAllowedTopicId: nullableIntEnv('TG_ALLOWED_TOPIC_ID'),
     codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
-    codexAppAutolaunch: boolEnv('CODEX_APP_AUTOLAUNCH', true),
-    codexAppLaunchCmd: process.env.CODEX_APP_LAUNCH_CMD || 'codex app',
+    codexAppAutolaunch: boolEnv('CODEX_APP_AUTOLAUNCH', platform.os === 'darwin'),
+    codexAppLaunchCmd: process.env.CODEX_APP_LAUNCH_CMD || '',
     codexAppSyncOnOpen: boolEnv('CODEX_APP_SYNC_ON_OPEN', true),
     codexAppSyncOnTurnComplete: boolEnv('CODEX_APP_SYNC_ON_TURN_COMPLETE', false),
     storePath: process.env.STORE_PATH || DEFAULT_STORE_PATH,
@@ -126,7 +128,7 @@ function parseSandboxMode(value: string): AppConfig['defaultSandboxMode'] {
 
 function resolveCommand(commandName: string): string | null {
   try {
-    const which = process.platform === 'win32' ? 'where' : 'which';
+    const which = getCommandLookupProgram();
     const result = spawnSync(which, [commandName], { encoding: 'utf8' });
     if (result.status !== 0) return null;
     return String(result.stdout).trim().split(/\r?\n/, 1)[0] || null;

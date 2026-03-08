@@ -9,6 +9,7 @@ import { TelegramGateway } from './telegram/gateway.js';
 import { CodexAppClient } from './codex_app/client.js';
 import { BridgeController } from './controller/controller.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
+import { detectPlatformCapabilities, getCommandLookupProgram, getDesktopOpenSupport } from './platform/capabilities.js';
 import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 
 const command = process.argv[2] || 'serve';
@@ -27,16 +28,28 @@ async function main(): Promise<void> {
 
   if (command === 'doctor') {
     const configuredCodexBin = process.env.CODEX_CLI_BIN;
+    const platform = detectPlatformCapabilities();
+    const desktopOpen = getDesktopOpenSupport();
     const checks = [
-      ['node >= 24', Number(process.versions.node.split('.')[0]) >= 24],
-      ['codex cli available', hasConfiguredCodexBin(configuredCodexBin) || hasCommand('codex')],
-      ['telegram bot token configured', Boolean(process.env.TG_BOT_TOKEN)],
-      ['telegram allowed user configured', Boolean(process.env.TG_ALLOWED_USER_ID)],
+      { name: 'node >= 24', ok: Number(process.versions.node.split('.')[0]) >= 24, required: true },
+      { name: 'codex cli available', ok: hasConfiguredCodexBin(configuredCodexBin) || hasCommand('codex'), required: true },
+      { name: 'codex app-server available', ok: hasCodexAppServer(configuredCodexBin), required: true },
+      { name: 'telegram bot token configured', ok: Boolean(process.env.TG_BOT_TOKEN), required: true },
+      { name: 'telegram allowed user configured', ok: Boolean(process.env.TG_ALLOWED_USER_ID), required: true },
+      { name: `platform detected: ${platform.os}, service manager: ${platform.serviceManager}`, ok: true, required: false },
+      {
+        name: desktopOpen.available
+          ? `desktop open available via ${desktopOpen.command}`
+          : `desktop open unavailable: ${desktopOpen.reason}`,
+        ok: desktopOpen.available,
+        required: false,
+      },
     ];
     let failed = false;
-    for (const [name, ok] of checks) {
-      console.log(`${ok ? '[OK]' : '[FAIL]'} ${name}`);
-      if (!ok) failed = true;
+    for (const check of checks) {
+      const prefix = check.ok ? '[OK]' : check.required ? '[FAIL]' : '[WARN]';
+      console.log(`${prefix} ${check.name}`);
+      if (!check.ok && check.required) failed = true;
     }
     try {
       const cwd = process.env.DEFAULT_CWD || process.cwd();
@@ -122,7 +135,7 @@ void main().catch((error) => {
 
 function hasCommand(commandName: string): boolean {
   try {
-    const which = process.platform === 'win32' ? 'where' : 'which';
+    const which = getCommandLookupProgram();
     const result = spawnSync(which, [commandName], { stdio: 'ignore' });
     return result.status === 0;
   } catch {
@@ -135,6 +148,25 @@ function hasConfiguredCodexBin(binPath: string | undefined): boolean {
   try {
     fs.accessSync(binPath, fs.constants.X_OK);
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasCodexAppServer(configuredCodexBin: string | undefined): boolean {
+  if (configuredCodexBin && hasConfiguredCodexBin(configuredCodexBin)) {
+    try {
+      const result = spawnSync(configuredCodexBin, ['app-server', '--help'], { stdio: 'ignore' });
+      return result.status === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  if (!hasCommand('codex')) return false;
+  try {
+    const result = spawnSync('codex', ['app-server', '--help'], { stdio: 'ignore' });
+    return result.status === 0;
   } catch {
     return false;
   }

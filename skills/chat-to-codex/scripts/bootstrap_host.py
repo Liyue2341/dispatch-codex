@@ -19,7 +19,7 @@ NODE_MAJOR_DEFAULT = 24
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Bootstrap telegram-codex-app-bridge on macOS.")
+    parser = argparse.ArgumentParser(description="Bootstrap telegram-codex-app-bridge on the current host.")
     parser.add_argument("--config-b64")
     parser.add_argument("--repo-url")
     parser.add_argument("--repo-ref")
@@ -107,12 +107,21 @@ def command_output(cmd, env=None, cwd=None) -> str:
 
 
 def detect_arch() -> tuple:
+    system_name = platform.system()
     machine = platform.machine().lower()
-    if machine in ("arm64", "aarch64"):
-        return "osx-arm64-tar", "darwin-arm64"
-    if machine in ("x86_64", "amd64"):
-        return "osx-x64-tar", "darwin-x64"
-    raise SystemExit(f"Unsupported macOS architecture: {machine}")
+    if system_name == "Darwin":
+        if machine in ("arm64", "aarch64"):
+            return "osx-arm64-tar", "darwin-arm64"
+        if machine in ("x86_64", "amd64"):
+            return "osx-x64-tar", "darwin-x64"
+        raise SystemExit(f"Unsupported macOS architecture: {machine}")
+    if system_name == "Linux":
+        if machine in ("arm64", "aarch64"):
+            return "linux-arm64-tar", "linux-arm64"
+        if machine in ("x86_64", "amd64"):
+            return "linux-x64-tar", "linux-x64"
+        raise SystemExit(f"Unsupported Linux architecture: {machine}")
+    raise SystemExit(f"Unsupported host platform: {system_name}")
 
 
 def ensure_local_node(node_major: int, tools_root: str) -> str:
@@ -130,7 +139,7 @@ def ensure_local_node(node_major: int, tools_root: str) -> str:
             selected = version
             break
     if selected is None:
-        raise SystemExit(f"Unable to find a Node.js v{node_major} macOS build")
+        raise SystemExit(f"Unable to find a Node.js v{node_major} build for this host")
 
     install_root = os.path.join(tools_root, f"node-{selected}-{archive_suffix}")
     node_bin = os.path.join(install_root, "bin", "node")
@@ -256,8 +265,8 @@ def write_env_file(config: dict, codex_bin: str) -> str:
         f"TG_ALLOWED_USER_ID={config['tg_allowed_user_id']}",
         f"TG_ALLOWED_CHAT_ID={config['tg_allowed_chat_id'] or ''}",
         f"TG_ALLOWED_TOPIC_ID={config['tg_allowed_topic_id'] or ''}",
-        "CODEX_APP_AUTOLAUNCH=true",
-        f"CODEX_APP_LAUNCH_CMD={codex_bin} app",
+        "CODEX_APP_AUTOLAUNCH=false",
+        "CODEX_APP_LAUNCH_CMD=",
         "CODEX_APP_SYNC_ON_OPEN=true",
         "CODEX_APP_SYNC_ON_TURN_COMPLETE=false",
         "STORE_PATH=",
@@ -296,18 +305,27 @@ def install_bridge(config: dict, env: dict) -> None:
     run(["npm", "run", "doctor"], env=env, cwd=install_dir)
 
 
-def maybe_install_launchd(config: dict, env: dict) -> bool:
+def detect_service_manager() -> str:
+    system_name = platform.system()
+    if system_name == "Darwin":
+        return "launchd"
+    if system_name == "Linux":
+        return "systemd"
+    return "manual"
+
+
+def maybe_install_service(config: dict, env: dict) -> bool:
     if config["no_start"]:
-        log("Skipping launchd install because --no-start was set")
+        log("Skipping service install because --no-start was set")
         return False
-    log("Installing launchd service")
-    run(["bash", "scripts/launchd/install.sh"], env=env, cwd=config["install_dir"])
+    log(f"Installing {detect_service_manager()} user service")
+    run(["bash", "scripts/service/install.sh"], env=env, cwd=config["install_dir"])
     return True
 
 
 def main() -> None:
-    if platform.system() != "Darwin":
-        raise SystemExit("This bootstrap currently supports macOS only")
+    if platform.system() not in ("Darwin", "Linux"):
+        raise SystemExit("This bootstrap currently supports macOS and Linux only")
 
     args = parse_args()
     config = merged_config(args)
@@ -331,10 +349,12 @@ def main() -> None:
     ensure_repo(config)
     env_path = write_env_file(config, codex_bin)
     install_bridge(config, env)
-    started = maybe_install_launchd(config, env)
+    started = maybe_install_service(config, env)
     login_status = check_codex_login(codex_bin, env)
 
     summary = {
+        "hostPlatform": platform.system(),
+        "serviceManager": detect_service_manager(),
         "installDir": config["install_dir"],
         "envPath": env_path,
         "defaultCwd": config["default_cwd"],
