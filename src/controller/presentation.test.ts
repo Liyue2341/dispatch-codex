@@ -4,6 +4,7 @@ import {
   buildAccessSettingsKeyboard,
   buildModeSettingsKeyboard,
   buildModelSettingsKeyboard,
+  buildSettingsHomeKeyboard,
   buildThreadsKeyboard,
   clampEffortToModel,
   formatAccessSettingsMessage,
@@ -12,6 +13,7 @@ import {
   formatCollaborationModeLabel,
   formatModeSettingsMessage,
   formatModelSettingsMessage,
+  formatSettingsHomeMessage,
   formatSandboxModeLabel,
   formatThreadsMessage,
   normalizeRequestedEffort,
@@ -95,6 +97,9 @@ test('formatModelSettingsMessage renders current selections', () => {
     locale: 'en',
     accessPreset: null,
     collaborationMode: null,
+    confirmPlanBeforeExecute: true,
+    autoQueueMessages: true,
+    persistPlanHistory: true,
     updatedAt: Date.now(),
   };
 
@@ -133,6 +138,9 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
     locale: 'en',
     accessPreset: null,
     collaborationMode: null,
+    confirmPlanBeforeExecute: true,
+    autoQueueMessages: true,
+    persistPlanHistory: true,
     updatedAt: Date.now(),
   };
 
@@ -144,7 +152,8 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
   assert.deepEqual(keyboard[1], [
     { text: 'o4-mini', callback_data: 'settings:model:o4-mini' },
   ]);
-  assert.equal(keyboard.at(-1)?.at(-1)?.text, '• high');
+  assert.equal(keyboard.at(-2)?.at(-1)?.text, '• high');
+  assert.equal(keyboard.at(-1)?.[0]?.text, 'Settings');
 });
 
 test('resolveRequestedModel matches model ids and display names', () => {
@@ -208,6 +217,8 @@ test('access presentation renders current preset and marks selected option', () 
     { text: 'Read-only', callback_data: 'settings:access:read-only' },
     { text: 'Default', callback_data: 'settings:access:default' },
     { text: '• Full access', callback_data: 'settings:access:full-access' },
+  ], [
+    { text: 'Settings', callback_data: 'settings:home' },
   ]]);
 });
 
@@ -225,6 +236,9 @@ test('mode presentation renders and marks selected option', () => {
     locale: 'en',
     accessPreset: null,
     collaborationMode: 'plan',
+    confirmPlanBeforeExecute: true,
+    autoQueueMessages: true,
+    persistPlanHistory: true,
     updatedAt: Date.now(),
   };
 
@@ -233,7 +247,47 @@ test('mode presentation renders and marks selected option', () => {
   assert.deepEqual(buildModeSettingsKeyboard('en', settings), [[
     { text: 'Default', callback_data: 'settings:mode:default' },
     { text: '• Plan', callback_data: 'settings:mode:plan' },
+  ], [
+    { text: 'Settings', callback_data: 'settings:home' },
   ]]);
+});
+
+test('settings home presentation summarizes session state and exposes toggles', () => {
+  const settings: ChatSessionSettings = {
+    chatId: 'chat-settings',
+    model: 'gpt-5',
+    reasoningEffort: 'medium',
+    locale: 'en',
+    accessPreset: 'default',
+    collaborationMode: 'plan',
+    confirmPlanBeforeExecute: true,
+    autoQueueMessages: false,
+    persistPlanHistory: true,
+    updatedAt: Date.now(),
+  };
+  const access = {
+    preset: 'default' as const,
+    approvalPolicy: 'on-request' as const,
+    sandboxMode: 'workspace-write' as const,
+  };
+
+  const rendered = formatSettingsHomeMessage('en', {
+    threadId: 'thread-1',
+    cwd: '/tmp/project',
+    settings,
+    access,
+    queueDepth: 2,
+    activeTurnId: 'turn-9',
+  });
+  const keyboard = buildSettingsHomeKeyboard('en', settings);
+
+  assert.match(rendered, /<b>Settings<\/b>/);
+  assert.match(rendered, /Thread: <b>thread-1<\/b>/);
+  assert.match(rendered, /Queue depth: <b>2<\/b>/);
+  assert.match(rendered, /Plan confirmation gate: yes/);
+  assert.equal(keyboard[0]?.[0]?.text, 'Models');
+  assert.equal(keyboard[1]?.[0]?.callback_data, 'settings:plan-gate:off');
+  assert.equal(keyboard[2]?.[0]?.callback_data, 'settings:queue:on');
 });
 
 test('presentation renders chinese locale strings', () => {
@@ -271,6 +325,9 @@ test('presentation renders chinese locale strings', () => {
     locale: 'zh',
     accessPreset: null,
     collaborationMode: null,
+    confirmPlanBeforeExecute: true,
+    autoQueueMessages: true,
+    persistPlanHistory: true,
     updatedAt: Date.now(),
   };
   const renderedModels = formatModelSettingsMessage('zh', models, settings);

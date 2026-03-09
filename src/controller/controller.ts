@@ -5,21 +5,28 @@ import type { AppConfig } from '../config.js';
 import { normalizeLocale, t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
+import { DEFAULT_GUIDED_PLAN_PREFERENCES } from '../types.js';
 import type {
+  AccountRateLimitSnapshot,
   AppLocale,
   CollaborationModeValue,
+  GuidedPlanSession,
   ModelInfo,
   PendingApprovalRecord,
   PendingUserInputQuestion,
   PendingUserInputRecord,
+  PlanSnapshotStep,
+  QueuedTurnInputRecord,
   ReasoningEffortValue,
   RuntimeStatus,
+  SandboxModeValue,
   ThreadBinding,
   ThreadSessionState,
 } from '../types.js';
 import { parseCommand } from './commands.js';
 import {
   buildAccessSettingsKeyboard,
+  buildSettingsHomeKeyboard,
   buildModeSettingsKeyboard,
   buildModelSettingsKeyboard,
   buildThreadsKeyboard,
@@ -30,6 +37,7 @@ import {
   formatApprovalPolicyLabel,
   formatModeSettingsMessage,
   formatModelSettingsMessage,
+  formatSettingsHomeMessage,
   formatSandboxModeLabel,
   formatThreadsMessage,
   formatWhereMessage,
@@ -51,7 +59,13 @@ import { chunkTelegramMessage, chunkTelegramStreamMessage, clipTelegramDraftMess
 import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/addressing.js';
 import { parseTelegramScopeId } from '../telegram/scope.js';
 import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
-import type { CodexAppClient, JsonRpcNotification, JsonRpcServerRequest, TurnInput } from '../codex_app/client.js';
+import {
+  PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  type CodexAppClient,
+  type JsonRpcNotification,
+  type JsonRpcServerRequest,
+  type TurnInput,
+} from '../codex_app/client.js';
 import {
   normalizeTurnActivityEvent,
   type RawExecCommandEvent,
@@ -109,6 +123,7 @@ interface ActiveTurn {
   renderRoute: TelegramRenderRoute;
   threadId: string;
   turnId: string;
+  queuedInputId: string | null;
   previewMessageId: number;
   previewActive: boolean;
   draftId: number | null;
@@ -126,6 +141,16 @@ interface ActiveTurn {
   pendingArchivedStatus: ArchivedStatusContent | null;
   planMessageId: number | null;
   planText: string | null;
+  planExplanation: string | null;
+  planSteps: PlanSnapshotStep[];
+  planDraftText: string | null;
+  planLastRenderedAt: number;
+  planRenderRequested: boolean;
+  forcePlanRender: boolean;
+  planRenderTask: Promise<void> | null;
+  guidedPlanSessionId: string | null;
+  guidedPlanDraftOnly: boolean;
+  guidedPlanExecutionBlocked: boolean;
   renderRetryTimer: NodeJS.Timeout | null;
   lastStreamFlushAt: number;
   renderRequested: boolean;
@@ -136,7 +161,43 @@ interface ActiveTurn {
 }
 
 type ApprovalAction = 'accept' | 'session' | 'deny';
+type PlanSessionAction = 'confirm' | 'revise' | 'cancel';
+type PlanRecoveryAction = 'continue' | 'show' | 'cancel';
 class UserFacingError extends Error {}
+
+const PLAN_MODE_DRAFT_ONLY_DEVELOPER_INSTRUCTIONS = [
+  PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  'You are in the planning-only phase of plan mode.',
+  'Produce or refine the plan, but do not execute commands, edit files, or apply changes yet.',
+  'If you need clarification, ask focused requestUserInput questions.',
+  'Once the plan is ready, stop and wait for explicit user confirmation before execution.',
+].join('\n\n');
+
+const PLAN_MODE_EXECUTION_CONFIRMATION_PROMPT = [
+  PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  'The user confirmed the latest plan.',
+  'Execute it now.',
+  'Keep asking focused requestUserInput questions if more guidance is needed.',
+].join('\n\n');
+
+const PLAN_MODE_REVISE_PROMPT = [
+  PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  'Revise the latest plan before executing anything.',
+  'Produce the updated plan only, then stop and wait for confirmation.',
+].join('\n\n');
+const PLAN_MODE_RECOVERY_EXECUTION_PROMPT = [
+  PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  'The bridge restarted after the user had already confirmed a plan.',
+  'Re-check the latest repository state, then continue executing the confirmed plan.',
+].join('\n\n');
+const PLAN_MODE_RECOVERY_DRAFT_PROMPT = [
+  PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  'The bridge restarted before the plan flow was resolved.',
+  'Rebuild or revise the latest plan only, then stop and wait for confirmation.',
+].join('\n\n');
+const PLAN_RENDER_DEBOUNCE_MS = 250;
+const HISTORY_RETENTION_MS = 1000 * 60 * 60 * 24 * 30;
+const MAX_RESOLVED_PLAN_SESSIONS_PER_CHAT = 20;
 
 export class BridgeController {
   private activeTurns = new Map<string, ActiveTurn>();
@@ -161,7 +222,7 @@ export class BridgeController {
       });
     });
     this.bot.on('callback', (event: TelegramCallbackEvent) => {
-      void this.handleCallback(event).catch((error) => {
+      void this.withLock(event.scopeId, async () => this.handleCallback(event)).catch((error) => {
         void this.handleAsyncError('telegram.callback', error, event.scopeId);
       });
     });
@@ -190,8 +251,20 @@ export class BridgeController {
 
     await this.app.start();
     await this.cleanupStaleTurnPreviews();
+    const requeuedTurnInputs = this.store.requeueInterruptedQueuedTurnInputs();
+    const cleanupResult = this.store.cleanupHistoricalRecords({
+      maxResolvedAgeMs: HISTORY_RETENTION_MS,
+      maxResolvedPlanSessionsPerChat: MAX_RESOLVED_PLAN_SESSIONS_PER_CHAT,
+    });
+    if (requeuedTurnInputs > 0 || Object.values(cleanupResult).some((count) => count > 0)) {
+      this.logger.info('store.startup_maintenance', {
+        requeuedTurnInputs,
+        ...cleanupResult,
+      });
+    }
     await this.bot.start();
     this.botUsername = this.bot.username;
+    await this.recoverPersistentState();
     this.updateStatus();
   }
 
@@ -207,6 +280,9 @@ export class BridgeController {
   }
 
   getRuntimeStatus(): RuntimeStatus {
+    const accountRateLimits = typeof (this.app as { getAccountRateLimits?: () => AccountRateLimitSnapshot | null }).getAccountRateLimits === 'function'
+      ? this.app.getAccountRateLimits()
+      : null;
     return {
       running: true,
       connected: this.app.isConnected(),
@@ -215,10 +291,31 @@ export class BridgeController {
       currentBindings: this.store.countBindings(),
       pendingApprovals: this.store.countPendingApprovals(),
       pendingUserInputs: this.store.countPendingUserInputs(),
+      queuedTurns: this.store.countQueuedTurnInputs(),
       activeTurns: this.activeTurns.size,
+      accountRateLimits,
       lastError: this.lastError,
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  private async readStatusRateLimits(): Promise<AccountRateLimitSnapshot | null> {
+    const app = this.app as {
+      getAccountRateLimits?: () => AccountRateLimitSnapshot | null;
+      readAccountRateLimits?: () => Promise<AccountRateLimitSnapshot | null>;
+    };
+    if (!this.app.isConnected()) {
+      return typeof app.getAccountRateLimits === 'function' ? app.getAccountRateLimits() : null;
+    }
+    if (typeof app.readAccountRateLimits !== 'function') {
+      return typeof app.getAccountRateLimits === 'function' ? app.getAccountRateLimits() : null;
+    }
+    try {
+      return await app.readAccountRateLimits();
+    } catch (error) {
+      this.logger.warn('codex.account_rate_limits_status_failed', { error: String(error) });
+      return typeof app.getAccountRateLimits === 'function' ? app.getAccountRateLimits() : null;
+    }
   }
 
   private async handleText(event: TelegramTextEvent): Promise<void> {
@@ -250,12 +347,39 @@ export class BridgeController {
 
     const pendingUserInput = this.store.getPendingUserInputForChat(scopeId);
     if (pendingUserInput) {
-      await this.handlePendingUserInputText(scopeId, pendingUserInput, decision.text, locale);
+      if (!this.shouldAllowInteractiveUserInput(scopeId)) {
+        await this.cancelPendingUserInput(pendingUserInput, locale);
+      } else {
+        await this.handlePendingUserInputText(scopeId, pendingUserInput, decision.text, locale);
+        return;
+      }
+    }
+
+    const awaitingPlanConfirmation = this.getAwaitingPlanConfirmationSession(scopeId);
+    if (awaitingPlanConfirmation) {
+      await this.sendMessage(scopeId, t(locale, 'plan_confirmation_pending'));
+      return;
+    }
+    const recoveryRequiredSession = this.store.listOpenPlanSessions(scopeId)
+      .find((session) => session.state === 'recovery_required') ?? null;
+    if (recoveryRequiredSession) {
+      await this.sendMessage(scopeId, t(locale, 'plan_recovery_pending'));
       return;
     }
 
-    if (this.findActiveTurn(scopeId)) {
-      await this.sendMessage(scopeId, t(locale, 'another_turn_running'));
+    const activeTurn = this.findActiveTurn(scopeId);
+    if (activeTurn) {
+      const settings = this.store.getChatSettings(scopeId);
+      if (!(settings?.autoQueueMessages ?? DEFAULT_GUIDED_PLAN_PREFERENCES.autoQueueMessages)) {
+        await this.sendMessage(scopeId, t(locale, 'another_turn_running'));
+        return;
+      }
+      await this.sendTyping(scopeId);
+      await this.enqueueTurnInput(
+        this.resolveActiveTurnBinding(scopeId, activeTurn),
+        { ...event, text: decision.text },
+        locale,
+      );
       return;
     }
 
@@ -264,17 +388,8 @@ export class BridgeController {
       ? await this.ensureThreadReady(scopeId, existingBinding)
       : await this.createBinding(scopeId, null);
     await this.sendTyping(scopeId);
-    const previewMessageId = 0;
-    try {
-      const input = await this.buildTurnInput(binding, { ...event, text: decision.text }, locale);
-      const turnState = await this.startTurnWithRecovery(scopeId, binding, input);
-      await this.registerActiveTurn(scopeId, event.chatId, event.chatType, event.topicId, turnState.threadId, turnState.turnId, previewMessageId);
-    } catch (error) {
-      if (previewMessageId > 0) {
-        await this.cleanupTransientPreview(scopeId, previewMessageId);
-      }
-      throw error;
-    }
+    const input = await this.buildTurnInput(binding, { ...event, text: decision.text }, locale);
+    await this.startIncomingTurn(scopeId, event.chatId, event.chatType, event.topicId, binding, input);
   }
 
   private async handleCommand(event: TelegramTextEvent, locale: AppLocale, name: string, args: string[]): Promise<void> {
@@ -291,6 +406,8 @@ export class BridgeController {
           '/new [cwd]',
           '/models',
           '/mode',
+          '/settings',
+          '/queue',
           '/permissions',
           '/reveal',
           '/where',
@@ -304,6 +421,8 @@ export class BridgeController {
         const binding = this.store.getBinding(scopeId);
         const settings = this.store.getChatSettings(scopeId);
         const access = this.resolveEffectiveAccess(scopeId, settings);
+        const rateLimits = await this.readStatusRateLimits();
+        this.updateStatus();
         const lines = [
           t(locale, 'status_connected', { value: t(locale, this.app.isConnected() ? 'yes' : 'no') }),
           t(locale, 'status_user_agent', { value: this.app.getUserAgent() ?? t(locale, 'unknown') }),
@@ -311,6 +430,16 @@ export class BridgeController {
           t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
           t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
           t(locale, 'status_mode', { value: formatCollaborationModeLabel(locale, settings?.collaborationMode ?? null) }),
+          ...formatRateLimitStatusLines(locale, rateLimits),
+          t(locale, 'status_confirm_plan_before_execute', {
+            value: t(locale, (settings?.confirmPlanBeforeExecute ?? DEFAULT_GUIDED_PLAN_PREFERENCES.confirmPlanBeforeExecute) ? 'yes' : 'no'),
+          }),
+          t(locale, 'status_auto_queue_messages', {
+            value: t(locale, (settings?.autoQueueMessages ?? DEFAULT_GUIDED_PLAN_PREFERENCES.autoQueueMessages) ? 'yes' : 'no'),
+          }),
+          t(locale, 'status_persist_plan_history', {
+            value: t(locale, (settings?.persistPlanHistory ?? DEFAULT_GUIDED_PLAN_PREFERENCES.persistPlanHistory) ? 'yes' : 'no'),
+          }),
           t(locale, 'status_access_preset', { value: formatAccessPresetLabel(locale, access.preset) }),
           t(locale, 'status_approval_policy', { value: formatApprovalPolicyLabel(locale, access.approvalPolicy) }),
           t(locale, 'status_sandbox_mode', { value: formatSandboxModeLabel(locale, access.sandboxMode) }),
@@ -318,6 +447,7 @@ export class BridgeController {
           t(locale, 'status_sync_on_turn_complete', { value: t(locale, this.config.codexAppSyncOnTurnComplete ? 'yes' : 'no') }),
           t(locale, 'status_pending_approvals', { value: this.store.countPendingApprovals() }),
           t(locale, 'status_pending_user_inputs', { value: this.store.countPendingUserInputs() }),
+          t(locale, 'status_queue_depth', { value: this.store.countQueuedTurnInputs(scopeId) }),
           t(locale, 'status_active_turns', { value: this.activeTurns.size }),
         ];
         await this.sendMessage(scopeId, lines.join('\n'));
@@ -392,6 +522,14 @@ export class BridgeController {
         await this.handleModeCommand(event, locale, args);
         return;
       }
+      case 'settings': {
+        await this.showSettingsHomePanel(scopeId, undefined, locale);
+        return;
+      }
+      case 'queue': {
+        await this.handleQueueCommand(event, locale, args);
+        return;
+      }
       case 'permissions':
       case 'access': {
         await this.showAccessSettingsPanel(scopeId, undefined, locale);
@@ -455,23 +593,53 @@ export class BridgeController {
       await this.handleNavigationCallback(event, navMatch[1]! as 'models' | 'mode' | 'threads' | 'reveal' | 'permissions', locale);
       return;
     }
+    if (event.data === 'settings:home') {
+      await this.showSettingsHomePanel(scopeId, event.messageId, locale);
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'opened_settings_home'));
+      return;
+    }
+    const guidedSettingsMatch = /^settings:(plan-gate|queue|history):(on|off)$/.exec(event.data);
+    if (guidedSettingsMatch) {
+      await this.handleGuidedPlanSettingsCallback(
+        event,
+        guidedSettingsMatch[1]! as 'plan-gate' | 'queue' | 'history',
+        guidedSettingsMatch[2]! as 'on' | 'off',
+        locale,
+      );
+      return;
+    }
     const settingsMatch = /^settings:(model|effort|mode|access):(.+)$/.exec(event.data);
     if (settingsMatch) {
       await this.handleSettingsCallback(event, settingsMatch[1]! as 'model' | 'effort' | 'mode' | 'access', settingsMatch[2]!, locale);
       return;
     }
-    const inputMatch = /^input:([a-f0-9]+):(other|option:\d+)$/.exec(event.data);
+    const planMatch = /^plan:([a-f0-9]+):(confirm|revise|cancel)$/.exec(event.data);
+    if (planMatch) {
+      await this.handlePlanSessionCallback(event, planMatch[1]!, planMatch[2]! as PlanSessionAction, locale);
+      return;
+    }
+    const recoveryMatch = /^recover:([a-f0-9]+):(continue|show|cancel)$/.exec(event.data);
+    if (recoveryMatch) {
+      await this.handlePlanRecoveryCallback(event, recoveryMatch[1]!, recoveryMatch[2]! as PlanRecoveryAction, locale);
+      return;
+    }
+    const queueMatch = /^queue:(next|clear)$/.exec(event.data);
+    if (queueMatch) {
+      await this.handleQueueCallback(event, queueMatch[1]! as 'next' | 'clear', locale);
+      return;
+    }
+    const inputMatch = /^input:([a-f0-9]+):(other|back|cancel|submit|edit:\d+|option:\d+)$/.exec(event.data);
     if (inputMatch) {
       await this.handlePendingUserInputCallback(event, inputMatch[1]!, inputMatch[2]!, locale);
       return;
     }
-    const match = /^approval:([a-f0-9]+):(accept|session|deny)$/.exec(event.data);
+    const match = /^approval:([a-f0-9]+):(accept|session|deny|details|back)$/.exec(event.data);
     if (!match) {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
     const localId = match[1]!;
-    const action = match[2]! as ApprovalAction;
+    const action = match[2]! as ApprovalAction | 'details' | 'back';
     const approval = this.store.getPendingApproval(localId);
     if (!approval || approval.resolvedAt) {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'approval_already_resolved'));
@@ -479,6 +647,18 @@ export class BridgeController {
     }
     if (approval.chatId !== scopeId || (approval.messageId !== null && approval.messageId !== event.messageId)) {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'approval_mismatch'));
+      return;
+    }
+    if (action === 'details' || action === 'back') {
+      if (approval.messageId !== null) {
+        await this.editMessage(
+          scopeId,
+          approval.messageId,
+          action === 'details' ? renderApprovalDetailsMessage(locale, approval) : renderApprovalMessage(locale, approval),
+          approvalKeyboard(locale, approval.localId, action === 'details'),
+        );
+      }
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, action === 'details' ? 'approval_showing_details' : 'approval_showing_summary'));
       return;
     }
 
@@ -541,6 +721,25 @@ export class BridgeController {
         await this.syncTurnPlan(active, params);
         return;
       }
+      case 'item/plan/delta': {
+        const params = notification.params as any;
+        const turnId = typeof params?.turnId === 'string'
+          ? params.turnId
+          : typeof params?.turn_id === 'string'
+            ? params.turn_id
+            : null;
+        const delta = typeof params?.delta === 'string' ? params.delta : null;
+        if (!turnId || !delta) return;
+        const active = this.activeTurns.get(turnId);
+        if (!active) return;
+        active.planDraftText = `${active.planDraftText ?? ''}${delta}`;
+        await this.queuePlanRender(active);
+        return;
+      }
+      case 'account/rateLimits/updated': {
+        this.updateStatus();
+        return;
+      }
       case 'error': {
         this.lastError = JSON.stringify(notification.params ?? {});
         this.logger.error('codex.notification.error', notification.params);
@@ -556,6 +755,9 @@ export class BridgeController {
     switch (request.method) {
       case 'item/commandExecution/requestApproval': {
         const params = request.params as any;
+        if (await this.rejectDraftOnlyApprovalRequestIfNeeded(request.id, params)) {
+          return;
+        }
         const approval = this.createApprovalRecord('command', request.id, params);
         await this.notePendingApprovalStatus(approval.threadId, approval.kind);
         const locale = this.localeForChat(approval.chatId);
@@ -567,6 +769,9 @@ export class BridgeController {
       }
       case 'item/fileChange/requestApproval': {
         const params = request.params as any;
+        if (await this.rejectDraftOnlyApprovalRequestIfNeeded(request.id, params)) {
+          return;
+        }
         const approval = this.createApprovalRecord('fileChange', request.id, params);
         await this.notePendingApprovalStatus(approval.threadId, approval.kind);
         const locale = this.localeForChat(approval.chatId);
@@ -578,6 +783,17 @@ export class BridgeController {
       }
       case 'item/tool/requestUserInput': {
         const params = request.params as any;
+        const threadId = typeof params?.threadId === 'string' ? params.threadId : String(params?.threadId || '');
+        const scopeId = threadId ? this.findChatByThread(threadId) : null;
+        if (scopeId && !this.shouldAllowInteractiveUserInput(scopeId)) {
+          const locale = this.localeForChat(scopeId);
+          await this.app.respondError(
+            request.id,
+            'Interactive requestUserInput is only available in plan mode for this chat.',
+          );
+          await this.sendMessage(scopeId, t(locale, 'input_plan_mode_only'));
+          return;
+        }
         const pendingInput = this.createPendingUserInputRecord(request.id, params);
         await this.notePendingUserInputStatus(pendingInput.threadId, pendingInput.localId);
         const locale = this.localeForChat(pendingInput.chatId);
@@ -605,20 +821,31 @@ export class BridgeController {
     return this.storeThreadSession(scopeId, session, 'seed');
   }
 
-  private async startTurnWithRecovery(scopeId: string, binding: Pick<ThreadBinding, 'threadId' | 'cwd'>, input: TurnInput[]): Promise<{ threadId: string; turnId: string }> {
+  private async startTurnWithRecovery(
+    scopeId: string,
+    binding: Pick<ThreadBinding, 'threadId' | 'cwd'>,
+    input: TurnInput[],
+    options: {
+      developerInstructions?: string | null;
+      accessOverride?: { approvalPolicy: string; sandboxMode: SandboxModeValue };
+      collaborationModeOverride?: CollaborationModeValue | null;
+    } = {},
+  ): Promise<{ threadId: string; turnId: string }> {
     const settings = this.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
-    const turnConfig = await this.resolveTurnConfiguration(scopeId, settings);
+    const turnConfig = await this.resolveTurnConfiguration(scopeId, settings, options.collaborationModeOverride);
+    const effectiveAccess = options.accessOverride ?? access;
     try {
       const turn = await this.app.startTurn({
         threadId: binding.threadId,
         input,
-        approvalPolicy: access.approvalPolicy,
-        sandboxMode: access.sandboxMode,
+        approvalPolicy: effectiveAccess.approvalPolicy,
+        sandboxMode: effectiveAccess.sandboxMode,
         cwd: binding.cwd ?? this.config.defaultCwd,
         model: turnConfig.model,
         effort: turnConfig.effort,
         collaborationMode: turnConfig.collaborationMode,
+        developerInstructions: options.developerInstructions ?? null,
       });
       return { threadId: binding.threadId, turnId: turn.id };
     } catch (error) {
@@ -630,16 +857,18 @@ export class BridgeController {
       await this.sendMessage(scopeId, t(this.localeForChat(scopeId), 'current_thread_unavailable_continued', { threadId: replacement.threadId }));
       const nextSettings = this.store.getChatSettings(scopeId);
       const nextAccess = this.resolveEffectiveAccess(scopeId, nextSettings);
-      const nextTurnConfig = await this.resolveTurnConfiguration(scopeId, nextSettings);
+      const nextTurnConfig = await this.resolveTurnConfiguration(scopeId, nextSettings, options.collaborationModeOverride);
+      const fallbackAccess = options.accessOverride ?? nextAccess;
       const turn = await this.app.startTurn({
         threadId: replacement.threadId,
         input,
-        approvalPolicy: nextAccess.approvalPolicy,
-        sandboxMode: nextAccess.sandboxMode,
+        approvalPolicy: fallbackAccess.approvalPolicy,
+        sandboxMode: fallbackAccess.sandboxMode,
         cwd: replacement.cwd ?? this.config.defaultCwd,
         model: nextTurnConfig.model,
         effort: nextTurnConfig.effort,
         collaborationMode: nextTurnConfig.collaborationMode,
+        developerInstructions: options.developerInstructions ?? null,
       });
       return { threadId: replacement.threadId, turnId: turn.id };
     }
@@ -674,6 +903,434 @@ export class BridgeController {
       });
     }
     return input;
+  }
+
+  private resolveActiveTurnBinding(scopeId: string, active: ActiveTurn): ThreadBinding {
+    const binding = this.store.getBinding(scopeId);
+    if (binding?.threadId === active.threadId) {
+      return binding;
+    }
+    return {
+      chatId: scopeId,
+      threadId: active.threadId,
+      cwd: binding?.cwd ?? this.config.defaultCwd,
+      updatedAt: Date.now(),
+    };
+  }
+
+  private async startIncomingTurn(
+    scopeId: string,
+    chatId: string,
+    chatType: string,
+    topicId: number | null,
+    binding: ThreadBinding,
+    input: TurnInput[],
+    options: { queuedInputId?: string | null } = {},
+  ): Promise<void> {
+    const settings = this.store.getChatSettings(scopeId);
+    const requiresPlanConfirmation = this.shouldRequirePlanConfirmation(scopeId, settings);
+    const turnState = await this.startTurnWithRecovery(
+      scopeId,
+      binding,
+      input,
+      requiresPlanConfirmation
+        ? {
+            developerInstructions: PLAN_MODE_DRAFT_ONLY_DEVELOPER_INSTRUCTIONS,
+            accessOverride: {
+              approvalPolicy: 'on-request',
+              sandboxMode: 'read-only',
+            },
+          }
+        : {},
+    );
+    let guidedPlanSessionId: string | null = null;
+    if (requiresPlanConfirmation) {
+      guidedPlanSessionId = this.createGuidedPlanSession(scopeId, turnState.threadId, turnState.turnId);
+    }
+    this.launchRegisteredTurn(
+      scopeId,
+      chatId,
+      chatType,
+      topicId,
+      turnState.threadId,
+      turnState.turnId,
+      0,
+      {
+        guidedPlanSessionId,
+        guidedPlanDraftOnly: requiresPlanConfirmation,
+        queuedInputId: options.queuedInputId ?? null,
+      },
+      options.queuedInputId ? 'queue.start' : 'telegram.turn_start',
+    );
+  }
+
+  private launchRegisteredTurn(
+    scopeId: string,
+    chatId: string,
+    chatType: string,
+    topicId: number | null,
+    threadId: string,
+    turnId: string,
+    previewMessageId: number,
+    options: {
+      guidedPlanSessionId?: string | null;
+      guidedPlanDraftOnly?: boolean;
+      queuedInputId?: string | null;
+    } = {},
+    errorSource = 'telegram.turn_start',
+  ): void {
+    void this.registerActiveTurn(
+      scopeId,
+      chatId,
+      chatType,
+      topicId,
+      threadId,
+      turnId,
+      previewMessageId,
+      options,
+    ).catch((error) => {
+      void this.handleAsyncError(errorSource, error, scopeId);
+    });
+  }
+
+  private async enqueueTurnInput(
+    binding: ThreadBinding,
+    event: TelegramTextEvent,
+    locale: AppLocale,
+  ): Promise<void> {
+    const input = await this.buildTurnInput(binding, event, locale);
+    const queueId = crypto.randomBytes(8).toString('hex');
+    const now = Date.now();
+    const sourceSummary = summarizeTelegramInput(event.text, event.attachments) || t(locale, 'queue_item_summary_fallback');
+    this.store.saveQueuedTurnInput({
+      queueId,
+      scopeId: event.scopeId,
+      chatId: event.chatId,
+      threadId: binding.threadId,
+      input,
+      sourceSummary,
+      telegramMessageId: null,
+      status: 'queued',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const queueDepth = this.store.countQueuedTurnInputs(event.scopeId);
+    await this.syncGuidedPlanQueueDepth(event.scopeId, queueDepth);
+    const receiptMessageId = await this.sendMessage(
+      event.scopeId,
+      renderQueuedTurnReceiptMessage(locale, queueDepth - 1),
+    );
+    const current = this.store.getQueuedTurnInput(queueId);
+    if (current) {
+      this.store.saveQueuedTurnInput({
+        ...current,
+        telegramMessageId: receiptMessageId,
+        updatedAt: Date.now(),
+      });
+    }
+    this.updateStatus();
+  }
+
+  private listQueuedTurnInputs(scopeId: string): QueuedTurnInputRecord[] {
+    return this.store.listQueuedTurnInputs(scopeId).filter((record) => record.status === 'queued');
+  }
+
+  private async syncGuidedPlanQueueDepth(scopeId: string, queueDepth = this.store.countQueuedTurnInputs(scopeId)): Promise<void> {
+    for (const session of this.store.listOpenPlanSessions(scopeId)) {
+      if (session.queueDepth === queueDepth) {
+        continue;
+      }
+      this.updatePlanSession(session.sessionId, { queueDepth });
+    }
+    const active = this.findActiveTurn(scopeId);
+    if (active) {
+      await this.queueTurnRender(active, { forceStatus: true });
+    }
+    this.updateStatus();
+  }
+
+  private async maybeStartQueuedTurn(scopeId: string): Promise<boolean> {
+    if (this.findActiveTurn(scopeId)) {
+      return false;
+    }
+    if (this.store.listPendingApprovals(scopeId).length > 0) {
+      return false;
+    }
+    if (this.store.getPendingUserInputForChat(scopeId)) {
+      return false;
+    }
+    if (this.store.listOpenPlanSessions(scopeId).some((session) => session.state === 'awaiting_plan_confirmation' || session.state === 'recovery_required')) {
+      return false;
+    }
+    while (true) {
+      const record = this.store.peekQueuedTurnInput(scopeId);
+      if (!record) {
+        await this.syncGuidedPlanQueueDepth(scopeId, 0);
+        return false;
+      }
+      const started = await this.startQueuedTurn(record);
+      if (started) {
+        return true;
+      }
+    }
+  }
+
+  private async startQueuedTurn(record: QueuedTurnInputRecord): Promise<boolean> {
+    const locale = this.localeForChat(record.scopeId);
+    this.store.updateQueuedTurnInputStatus(record.queueId, 'processing');
+    await this.syncGuidedPlanQueueDepth(record.scopeId);
+    try {
+      const binding = await this.ensureThreadReady(record.scopeId, {
+        chatId: record.scopeId,
+        threadId: record.threadId,
+        cwd: this.store.getBinding(record.scopeId)?.cwd ?? this.config.defaultCwd,
+        updatedAt: Date.now(),
+      });
+      await this.sendTyping(record.scopeId);
+      const target = parseTelegramScopeId(record.scopeId);
+      await this.startIncomingTurn(
+        record.scopeId,
+        target.chatId,
+        inferTelegramChatType(target.chatId),
+        target.topicId,
+        binding,
+        record.input as TurnInput[],
+        { queuedInputId: record.queueId },
+      );
+      return true;
+    } catch (error) {
+      this.store.updateQueuedTurnInputStatus(record.queueId, 'failed');
+      await this.syncGuidedPlanQueueDepth(record.scopeId);
+      await this.sendMessage(record.scopeId, t(locale, 'queue_start_failed', { error: formatUserError(error) }));
+      this.logger.warn('queue.start_failed', {
+        scopeId: record.scopeId,
+        queueId: record.queueId,
+        error: String(error),
+      });
+      return false;
+    }
+  }
+
+  private cancelQueuedTurnInputs(scopeId: string, mode: 'next' | 'clear'): number {
+    const queued = this.listQueuedTurnInputs(scopeId);
+    const targets = mode === 'next' ? queued.slice(0, 1) : queued;
+    for (const record of targets) {
+      this.store.updateQueuedTurnInputStatus(record.queueId, 'cancelled');
+    }
+    return targets.length;
+  }
+
+  private async handleQueueCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    const action = args.join(' ').trim().toLowerCase();
+    if (!action) {
+      await this.showQueuePanel(event.scopeId, undefined, locale);
+      return;
+    }
+    if (action !== 'next' && action !== 'clear') {
+      await this.sendMessage(event.scopeId, t(locale, 'usage_queue'));
+      return;
+    }
+    const count = this.cancelQueuedTurnInputs(event.scopeId, action);
+    await this.syncGuidedPlanQueueDepth(event.scopeId);
+    await this.sendMessage(
+      event.scopeId,
+      t(locale, action === 'next' ? 'queue_cancel_next_result' : 'queue_clear_result', { value: count }),
+    );
+  }
+
+  private async handleQueueCallback(
+    event: TelegramCallbackEvent,
+    action: 'next' | 'clear',
+    locale: AppLocale,
+  ): Promise<void> {
+    const count = this.cancelQueuedTurnInputs(event.scopeId, action);
+    await this.syncGuidedPlanQueueDepth(event.scopeId);
+    await this.showQueuePanel(event.scopeId, event.messageId, locale);
+    await this.bot.answerCallback(
+      event.callbackQueryId,
+      t(locale, action === 'next' ? 'queue_cancel_next_result_short' : 'queue_clear_result_short', { value: count }),
+    );
+  }
+
+  private async showQueuePanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
+    const queued = this.listQueuedTurnInputs(scopeId);
+    const text = renderQueueStatusMessage(locale, {
+      activeTurnId: this.findActiveTurn(scopeId)?.turnId ?? null,
+      queueDepth: queued.length,
+      items: queued,
+    });
+    const keyboard = queued.length > 0 ? queueControlKeyboard(locale) : [];
+    if (messageId !== undefined) {
+      await this.editMessage(scopeId, messageId, text, keyboard);
+      return;
+    }
+    await this.sendMessage(scopeId, text, keyboard);
+  }
+
+  private async recoverPersistentState(): Promise<void> {
+    await this.recoverPlanSessions();
+    await this.recoverPendingApprovals();
+    await this.recoverPendingUserInputs();
+    const scopeIds = this.store.listQueuedTurnInputs()
+      .filter((record) => record.status === 'queued')
+      .map((record) => record.scopeId)
+      .filter((scopeId, index, values) => values.indexOf(scopeId) === index);
+    for (const scopeId of scopeIds) {
+      await this.withLock(scopeId, async () => {
+        await this.maybeStartQueuedTurn(scopeId);
+      });
+    }
+  }
+
+  private async recoverPlanSessions(): Promise<void> {
+    for (const session of this.store.listOpenPlanSessions()) {
+      const locale = this.localeForChat(session.chatId);
+      if (session.state === 'awaiting_plan_confirmation') {
+        const rendered = renderPlanConfirmationMessage(locale, session);
+        const messageId = await this.upsertPlanConfirmationPrompt(session, rendered);
+        this.updatePlanSession(session.sessionId, { lastPromptMessageId: messageId });
+        continue;
+      }
+      const nextSession = session.state === 'recovery_required'
+        ? session
+        : this.updatePlanSession(session.sessionId, {
+            state: 'recovery_required',
+            currentPromptId: crypto.randomBytes(6).toString('hex'),
+          });
+      if (!nextSession) {
+        continue;
+      }
+      const latestSnapshot = this.store.listPlanSnapshots(nextSession.sessionId).at(-1) ?? null;
+      const rendered = renderPlanRecoveryMessage(locale, nextSession, latestSnapshot);
+      const messageId = await this.upsertPlanConfirmationPrompt(nextSession, rendered);
+      this.updatePlanSession(nextSession.sessionId, { lastPromptMessageId: messageId });
+    }
+  }
+
+  private async recoverPendingApprovals(): Promise<void> {
+    for (const approval of this.store.listPendingApprovals()) {
+      const locale = this.localeForChat(approval.chatId);
+      const messageId = await this.sendMessage(
+        approval.chatId,
+        renderApprovalMessage(locale, approval),
+        approvalKeyboard(locale, approval.localId),
+      );
+      this.store.updatePendingApprovalMessage(approval.localId, messageId);
+      this.armApprovalTimer(approval.localId);
+    }
+  }
+
+  private async recoverPendingUserInputs(): Promise<void> {
+    for (const pendingInput of this.store.listPendingUserInputs()) {
+      const locale = this.localeForChat(pendingInput.chatId);
+      const messageId = await this.openPendingUserInputPrompt(pendingInput, locale);
+      this.store.updatePendingUserInputMessage(pendingInput.localId, messageId);
+    }
+  }
+
+  private async handlePlanRecoveryCallback(
+    event: TelegramCallbackEvent,
+    sessionId: string,
+    action: PlanRecoveryAction,
+    locale: AppLocale,
+  ): Promise<void> {
+    const session = this.store.getPlanSession(sessionId);
+    if (!session) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_recovery_resolved'));
+      return;
+    }
+    if (session.chatId !== event.scopeId || (session.lastPromptMessageId !== null && session.lastPromptMessageId !== event.messageId)) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_confirmation_mismatch'));
+      return;
+    }
+    if (session.state !== 'recovery_required') {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_recovery_resolved'));
+      return;
+    }
+    if (action === 'show') {
+      const latestSnapshot = this.store.listPlanSnapshots(sessionId).at(-1) ?? null;
+      if (!latestSnapshot) {
+        await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_recovery_no_snapshot'));
+        return;
+      }
+      await this.sendHtmlMessage(event.scopeId, renderRecoveredPlanSnapshotMessage(locale, session, latestSnapshot));
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_recovery_showing_snapshot'));
+      return;
+    }
+    if (action === 'cancel') {
+      const cancelled = this.updatePlanSession(sessionId, {
+        state: 'cancelled',
+        currentPromptId: null,
+        resolvedAt: Date.now(),
+      });
+      if (cancelled && cancelled.lastPromptMessageId !== null) {
+        await this.editHtmlMessage(
+          cancelled.chatId,
+          cancelled.lastPromptMessageId,
+          renderResolvedPlanRecoveryMessage(locale, cancelled, action),
+          [],
+        );
+      }
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_recovery_cancelled'));
+      await this.maybeStartQueuedTurn(event.scopeId);
+      return;
+    }
+    if (this.findActiveTurn(event.scopeId)) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'wait_current_turn'));
+      return;
+    }
+    const binding = await this.resolvePlanSessionBinding(event.scopeId, session.threadId);
+    const continuingConfirmedPlan = session.confirmedPlanVersion !== null;
+    await this.sendTyping(event.scopeId);
+    const turnState = await this.startTurnWithRecovery(
+      event.scopeId,
+      binding,
+      this.buildPlanTurnInput(continuingConfirmedPlan ? PLAN_MODE_RECOVERY_EXECUTION_PROMPT : PLAN_MODE_RECOVERY_DRAFT_PROMPT),
+      continuingConfirmedPlan
+        ? {
+            developerInstructions: PLAN_MODE_RECOVERY_EXECUTION_PROMPT,
+            collaborationModeOverride: 'plan',
+          }
+        : {
+            developerInstructions: PLAN_MODE_RECOVERY_DRAFT_PROMPT,
+            accessOverride: {
+              approvalPolicy: 'on-request',
+              sandboxMode: 'read-only',
+            },
+            collaborationModeOverride: 'plan',
+          },
+    );
+    const nextSession = this.updatePlanSession(sessionId, {
+      threadId: turnState.threadId,
+      sourceTurnId: continuingConfirmedPlan ? session.sourceTurnId : turnState.turnId,
+      executionTurnId: continuingConfirmedPlan ? turnState.turnId : null,
+      state: continuingConfirmedPlan ? 'executing_confirmed_plan' : 'drafting_plan',
+      currentPromptId: null,
+      resolvedAt: null,
+    });
+    if (session.lastPromptMessageId !== null && nextSession) {
+      await this.editHtmlMessage(
+        session.chatId,
+        session.lastPromptMessageId,
+        renderResolvedPlanRecoveryMessage(locale, nextSession, action),
+        [],
+      );
+    }
+    this.launchRegisteredTurn(
+      event.scopeId,
+      event.chatId,
+      inferTelegramChatType(event.chatId),
+      event.topicId,
+      turnState.threadId,
+      turnState.turnId,
+      0,
+      {
+        guidedPlanSessionId: sessionId,
+        guidedPlanDraftOnly: !continuingConfirmedPlan,
+      },
+      'plan.recovery_start',
+    );
+    await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_recovery_continuing'));
   }
 
   private async stageAttachments(
@@ -732,6 +1389,7 @@ export class BridgeController {
     threadId: string,
     turnId: string,
     previewMessageId: number,
+    options: { guidedPlanSessionId?: string | null; guidedPlanDraftOnly?: boolean; queuedInputId?: string | null } = {},
   ): Promise<void> {
     let resolveTurn!: () => void;
     const waitForTurn = new Promise<void>((resolve) => {
@@ -744,6 +1402,7 @@ export class BridgeController {
       renderRoute: resolveTelegramRenderRoute(chatType, topicId),
       threadId,
       turnId,
+      queuedInputId: options.queuedInputId ?? null,
       previewMessageId,
       previewActive: previewMessageId > 0,
       draftId: null,
@@ -761,6 +1420,16 @@ export class BridgeController {
       pendingArchivedStatus: null,
       planMessageId: null,
       planText: null,
+      planExplanation: null,
+      planSteps: [],
+      planDraftText: null,
+      planLastRenderedAt: 0,
+      planRenderRequested: false,
+      forcePlanRender: false,
+      planRenderTask: null,
+      guidedPlanSessionId: options.guidedPlanSessionId ?? null,
+      guidedPlanDraftOnly: Boolean(options.guidedPlanDraftOnly),
+      guidedPlanExecutionBlocked: false,
       renderRetryTimer: null,
       lastStreamFlushAt: 0,
       renderRequested: false,
@@ -791,6 +1460,7 @@ export class BridgeController {
     const locale = this.localeForChat(active.scopeId);
     let shouldMarkPartialOutput = false;
     try {
+      await this.renderPlanCard(active);
       await this.queueTurnRender(active, { forceStatus: true, forceStream: true });
       const renderedMessages = active.segments.reduce((count, segment) => count + segment.messages.length, 0);
       if (renderedMessages === 0) {
@@ -808,6 +1478,167 @@ export class BridgeController {
     }
     if (shouldMarkPartialOutput) {
       await this.sendMessage(active.scopeId, t(locale, 'interrupted_partial_output'));
+    }
+    if (active.queuedInputId) {
+      this.store.updateQueuedTurnInputStatus(active.queuedInputId, 'completed');
+      await this.syncGuidedPlanQueueDepth(active.scopeId);
+    }
+  }
+
+  private async finalizeGuidedPlanTurn(active: ActiveTurn): Promise<void> {
+    if (!active.guidedPlanSessionId) {
+      return;
+    }
+    const session = this.store.getPlanSession(active.guidedPlanSessionId);
+    if (!session) {
+      return;
+    }
+    if (active.guidedPlanDraftOnly) {
+      await this.finalizeGuidedPlanDraftTurn(active, session);
+      return;
+    }
+    const terminalState = active.interruptRequested ? 'interrupted' : 'completed';
+    this.updatePlanSession(session.sessionId, {
+      state: terminalState,
+      currentPromptId: null,
+      executionTurnId: active.turnId,
+      resolvedAt: Date.now(),
+    });
+    this.updateStatus();
+  }
+
+  private async finalizeGuidedPlanDraftTurn(active: ActiveTurn, session: GuidedPlanSession): Promise<void> {
+    if (active.interruptRequested && !active.guidedPlanExecutionBlocked) {
+      this.updatePlanSession(session.sessionId, {
+        state: 'interrupted',
+        currentPromptId: null,
+        resolvedAt: Date.now(),
+      });
+      await this.sendMessage(active.scopeId, t(this.localeForChat(active.scopeId), 'plan_draft_interrupted'));
+      this.updateStatus();
+      return;
+    }
+    const nextSession = this.updatePlanSession(session.sessionId, {
+      threadId: active.threadId,
+      sourceTurnId: active.turnId,
+      executionTurnId: null,
+      state: 'awaiting_plan_confirmation',
+      currentPromptId: crypto.randomBytes(6).toString('hex'),
+      resolvedAt: null,
+    });
+    if (!nextSession) {
+      return;
+    }
+    const locale = this.localeForChat(active.scopeId);
+    const rendered = renderPlanConfirmationMessage(locale, nextSession, {
+      blockedExecution: active.guidedPlanExecutionBlocked,
+    });
+    const promptMessageId = await this.upsertPlanConfirmationPrompt(nextSession, rendered);
+    this.updatePlanSession(session.sessionId, {
+      lastPromptMessageId: promptMessageId,
+    });
+    this.updateStatus();
+  }
+
+  private async upsertPlanConfirmationPrompt(
+    session: GuidedPlanSession,
+    rendered: { html: string; keyboard: Array<Array<{ text: string; callback_data: string }>> },
+  ): Promise<number> {
+    if (session.lastPromptMessageId !== null) {
+      try {
+        await this.editHtmlMessage(session.chatId, session.lastPromptMessageId, rendered.html, rendered.keyboard);
+        return session.lastPromptMessageId;
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          throw error;
+        }
+      }
+    }
+    return this.sendHtmlMessage(session.chatId, rendered.html, rendered.keyboard);
+  }
+
+  private async queuePlanRender(active: ActiveTurn, force = false): Promise<void> {
+    active.planRenderRequested = true;
+    active.forcePlanRender = active.forcePlanRender || force;
+    if (force) {
+      await this.renderPlanCard(active);
+      active.planRenderRequested = false;
+      active.forcePlanRender = false;
+      return;
+    }
+    if (active.planRenderTask) {
+      await active.planRenderTask;
+      return;
+    }
+    active.planRenderTask = (async () => {
+      while (active.planRenderRequested) {
+        const forceRender = active.forcePlanRender;
+        active.planRenderRequested = false;
+        active.forcePlanRender = false;
+        const debounceMs = forceRender
+          ? 0
+          : Math.max(0, PLAN_RENDER_DEBOUNCE_MS - (Date.now() - active.planLastRenderedAt));
+        if (debounceMs > 0) {
+          await delay(debounceMs);
+        }
+        if (!this.activeTurns.has(active.turnId)) {
+          return;
+        }
+        await this.renderPlanCard(active);
+      }
+    })().finally(() => {
+      active.planRenderTask = null;
+    });
+    await active.planRenderTask;
+  }
+
+  private async renderPlanCard(active: ActiveTurn): Promise<void> {
+    const session = active.guidedPlanSessionId ? this.store.getPlanSession(active.guidedPlanSessionId) : null;
+    const hasStructuredPlan = active.planSteps.length > 0 || Boolean(active.planExplanation);
+    const hasDraftText = Boolean(active.planDraftText?.trim());
+    if (!hasStructuredPlan && !hasDraftText) {
+      return;
+    }
+    const locale = this.localeForChat(active.scopeId);
+    const html = renderTurnPlanMessage(locale, active.planExplanation, active.planSteps, {
+      latestVersion: session?.latestPlanVersion ?? null,
+      confirmedVersion: session?.confirmedPlanVersion ?? null,
+      draftText: active.planDraftText,
+    });
+    const existingMessageId = active.planMessageId ?? session?.lastPlanMessageId ?? null;
+    if (existingMessageId !== null && active.planText === html) {
+      return;
+    }
+    if (existingMessageId !== null) {
+      try {
+        await this.editHtmlMessage(active.scopeId, existingMessageId, html, []);
+        active.planMessageId = existingMessageId;
+        active.planText = html;
+        active.planLastRenderedAt = Date.now();
+        if (session) {
+          this.updatePlanSession(session.sessionId, {
+            lastPlanMessageId: existingMessageId,
+          });
+        }
+        return;
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.plan_update_edit_failed', {
+            turnId: active.turnId,
+            messageId: existingMessageId,
+            error: String(error),
+          });
+        }
+      }
+    }
+    const messageId = await this.sendHtmlMessage(active.scopeId, html);
+    active.planMessageId = messageId;
+    active.planText = html;
+    active.planLastRenderedAt = Date.now();
+    if (session) {
+      this.updatePlanSession(session.sessionId, {
+        lastPlanMessageId: messageId,
+      });
     }
   }
 
@@ -868,6 +1699,7 @@ export class BridgeController {
         try {
           this.promoteReadyToolBatch(active);
           await this.completeTurn(active);
+          await this.finalizeGuidedPlanTurn(active);
           if (this.config.codexAppSyncOnTurnComplete) {
             const revealError = await this.tryRevealThread(active.scopeId, active.threadId, 'turn-complete');
             if (revealError) {
@@ -883,6 +1715,11 @@ export class BridgeController {
           active.resolver();
           this.activeTurns.delete(active.turnId);
           this.updateStatus();
+          void this.withLock(active.scopeId, async () => {
+            await this.maybeStartQueuedTurn(active.scopeId);
+          }).catch((error) => {
+            void this.handleAsyncError('queue.autostart', error, active.scopeId);
+          });
         }
         return;
       }
@@ -895,6 +1732,7 @@ export class BridgeController {
     if (!scopeId) {
       throw new Error(`No chat binding found for thread ${threadId}`);
     }
+    const details = deriveApprovalDetails(kind, params);
     const record: PendingApprovalRecord = {
       localId: crypto.randomBytes(8).toString('hex'),
       serverRequestId: String(serverRequestId),
@@ -905,8 +1743,15 @@ export class BridgeController {
       itemId: String(params.itemId),
       approvalId: params.approvalId ? String(params.approvalId) : null,
       reason: params.reason ? String(params.reason) : null,
-      command: params.command ? String(params.command) : null,
+      command: typeof params.command === 'string'
+        ? params.command
+        : Array.isArray(params.command)
+          ? params.command.map((part: unknown) => String(part)).join(' ')
+          : null,
       cwd: params.cwd ? String(params.cwd) : null,
+      summary: details.summary,
+      riskLevel: details.riskLevel,
+      details: details.details,
       messageId: null,
       createdAt: Date.now(),
       resolvedAt: null,
@@ -958,6 +1803,31 @@ export class BridgeController {
     };
     this.store.savePendingUserInput(record);
     return record;
+  }
+
+  private async rejectDraftOnlyApprovalRequestIfNeeded(serverRequestId: string | number, params: any): Promise<boolean> {
+    const turnId = typeof params?.turnId === 'string' ? params.turnId : String(params?.turnId || '');
+    if (!turnId) {
+      return false;
+    }
+    const active = this.activeTurns.get(turnId);
+    if (!active?.guidedPlanDraftOnly) {
+      return false;
+    }
+    active.guidedPlanExecutionBlocked = true;
+    await this.app.respond(serverRequestId, { decision: 'decline' });
+    await this.sendMessage(active.scopeId, t(this.localeForChat(active.scopeId), 'plan_draft_execution_blocked'));
+    if (!active.interruptRequested) {
+      try {
+        await this.requestInterrupt(active);
+      } catch (error) {
+        this.logger.warn('guided_plan.draft_interrupt_failed', {
+          turnId: active.turnId,
+          error: String(error),
+        });
+      }
+    }
+    return true;
   }
 
   private findChatByThread(threadId: string): string | null {
@@ -1145,10 +2015,13 @@ export class BridgeController {
   private async resolveTurnConfiguration(
     scopeId: string,
     settings = this.store.getChatSettings(scopeId),
+    collaborationModeOverride?: CollaborationModeValue | null,
   ): Promise<{ model: string | null; effort: ReasoningEffortValue | null; collaborationMode: CollaborationModeValue | null }> {
     let model = settings?.model ?? null;
     const effort = settings?.reasoningEffort ?? null;
-    const collaborationMode = settings?.collaborationMode ?? null;
+    const collaborationMode = collaborationModeOverride === undefined
+      ? settings?.collaborationMode ?? null
+      : collaborationModeOverride;
     if (collaborationMode === 'plan' && !model) {
       const models = await this.app.listModels();
       model = resolveCurrentModel(models, null)?.model ?? null;
@@ -1176,6 +2049,216 @@ export class BridgeController {
     return [...this.activeTurns.values()].find(turn => turn.scopeId === scopeId);
   }
 
+  private shouldRequirePlanConfirmation(
+    scopeId: string,
+    settings = this.store.getChatSettings(scopeId),
+  ): boolean {
+    return (settings?.collaborationMode ?? null) === 'plan'
+      && (settings?.confirmPlanBeforeExecute ?? DEFAULT_GUIDED_PLAN_PREFERENCES.confirmPlanBeforeExecute);
+  }
+
+  private shouldAllowInteractiveUserInput(
+    scopeId: string,
+    settings = this.store.getChatSettings(scopeId),
+  ): boolean {
+    return (settings?.collaborationMode ?? null) === 'plan';
+  }
+
+  private async clearPendingUserInputsIfNeeded(scopeId: string, locale = this.localeForChat(scopeId)): Promise<void> {
+    if (this.shouldAllowInteractiveUserInput(scopeId)) {
+      return;
+    }
+    for (const record of this.store.listPendingUserInputs(scopeId)) {
+      await this.cancelPendingUserInput(record, locale);
+    }
+  }
+
+  private getAwaitingPlanConfirmationSession(scopeId: string): GuidedPlanSession | null {
+    return this.store.listOpenPlanSessions(scopeId)
+      .find((session) => session.state === 'awaiting_plan_confirmation') ?? null;
+  }
+
+  private createGuidedPlanSession(scopeId: string, threadId: string, sourceTurnId: string): string {
+    const now = Date.now();
+    const sessionId = crypto.randomBytes(8).toString('hex');
+    this.store.savePlanSession({
+      sessionId,
+      chatId: scopeId,
+      threadId,
+      sourceTurnId,
+      executionTurnId: null,
+      state: 'drafting_plan',
+      confirmationRequired: true,
+      confirmedPlanVersion: null,
+      latestPlanVersion: null,
+      currentPromptId: null,
+      currentApprovalId: null,
+      queueDepth: 0,
+      lastPlanMessageId: null,
+      lastPromptMessageId: null,
+      lastApprovalMessageId: null,
+      createdAt: now,
+      updatedAt: now,
+      resolvedAt: null,
+    });
+    return sessionId;
+  }
+
+  private async resolvePlanSessionBinding(scopeId: string, threadId: string): Promise<ThreadBinding> {
+    const existing = this.store.getBinding(scopeId);
+    if (existing?.threadId === threadId) {
+      return this.ensureThreadReady(scopeId, existing);
+    }
+    const thread = await this.app.readThread(threadId, false);
+    if (!thread) {
+      throw new Error(`Thread ${threadId} is unavailable`);
+    }
+    const cwd = thread.cwd ?? this.config.defaultCwd;
+    this.store.setBinding(scopeId, threadId, cwd);
+    return {
+      chatId: scopeId,
+      threadId,
+      cwd,
+      updatedAt: Date.now(),
+    };
+  }
+
+  private buildPlanTurnInput(text: string): TurnInput[] {
+    return [{
+      type: 'text',
+      text,
+      text_elements: [],
+    }];
+  }
+
+  private updatePlanSession(
+    sessionId: string,
+    updates: Partial<GuidedPlanSession>,
+  ): GuidedPlanSession | null {
+    const current = this.store.getPlanSession(sessionId);
+    if (!current) {
+      return null;
+    }
+    const next: GuidedPlanSession = {
+      ...current,
+      ...updates,
+      updatedAt: Date.now(),
+    };
+    this.store.savePlanSession(next);
+    return next;
+  }
+
+  private async handlePlanSessionCallback(
+    event: TelegramCallbackEvent,
+    sessionId: string,
+    action: PlanSessionAction,
+    locale: AppLocale,
+  ): Promise<void> {
+    const session = this.store.getPlanSession(sessionId);
+    if (!session) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_confirmation_resolved'));
+      return;
+    }
+    if (session.chatId !== event.scopeId || (session.lastPromptMessageId !== null && session.lastPromptMessageId !== event.messageId)) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_confirmation_mismatch'));
+      return;
+    }
+    if (session.resolvedAt !== null || session.state === 'cancelled' || session.state === 'completed' || session.state === 'interrupted') {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_confirmation_resolved'));
+      return;
+    }
+    if (session.state !== 'awaiting_plan_confirmation') {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_action_unavailable'));
+      return;
+    }
+    if (this.findActiveTurn(event.scopeId)) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'wait_current_turn'));
+      return;
+    }
+    if (action === 'cancel') {
+      const cancelled = this.updatePlanSession(sessionId, {
+        state: 'cancelled',
+        currentPromptId: null,
+        resolvedAt: Date.now(),
+      });
+      if (cancelled && cancelled.lastPromptMessageId !== null) {
+        await this.editHtmlMessage(
+          cancelled.chatId,
+          cancelled.lastPromptMessageId,
+          renderResolvedPlanConfirmationMessage(locale, cancelled, action),
+          [],
+        );
+      }
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_action_started_cancel'));
+      this.updateStatus();
+      await this.maybeStartQueuedTurn(event.scopeId);
+      return;
+    }
+    if (action === 'confirm' && session.latestPlanVersion === null) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'plan_action_unavailable'));
+      return;
+    }
+
+    await this.sendTyping(event.scopeId);
+    const binding = await this.resolvePlanSessionBinding(event.scopeId, session.threadId);
+    const turnState = await this.startTurnWithRecovery(
+      event.scopeId,
+      binding,
+      this.buildPlanTurnInput(action === 'confirm' ? PLAN_MODE_EXECUTION_CONFIRMATION_PROMPT : PLAN_MODE_REVISE_PROMPT),
+      action === 'revise'
+        ? {
+            developerInstructions: PLAN_MODE_REVISE_PROMPT,
+            accessOverride: {
+              approvalPolicy: 'on-request',
+              sandboxMode: 'read-only',
+            },
+            collaborationModeOverride: 'plan',
+          }
+        : {
+            developerInstructions: PLAN_MODE_EXECUTION_CONFIRMATION_PROMPT,
+            collaborationModeOverride: 'plan',
+          },
+    );
+    const nextSession = this.updatePlanSession(sessionId, {
+      threadId: turnState.threadId,
+      sourceTurnId: action === 'revise' ? turnState.turnId : session.sourceTurnId,
+      executionTurnId: action === 'confirm' ? turnState.turnId : null,
+      state: action === 'confirm' ? 'executing_confirmed_plan' : 'drafting_plan',
+      confirmedPlanVersion: action === 'confirm'
+        ? session.latestPlanVersion
+        : session.confirmedPlanVersion,
+      currentPromptId: null,
+      lastPromptMessageId: action === 'revise' ? null : session.lastPromptMessageId,
+      resolvedAt: null,
+    });
+    if (session.lastPromptMessageId !== null && nextSession) {
+      await this.editHtmlMessage(
+        session.chatId,
+        session.lastPromptMessageId,
+        renderResolvedPlanConfirmationMessage(locale, nextSession, action),
+        [],
+      );
+    }
+    this.launchRegisteredTurn(
+      event.scopeId,
+      event.chatId,
+      inferTelegramChatType(event.chatId),
+      event.topicId,
+      turnState.threadId,
+      turnState.turnId,
+      0,
+      {
+        guidedPlanSessionId: sessionId,
+        guidedPlanDraftOnly: action === 'revise',
+      },
+      'plan.session_start',
+    );
+    await this.bot.answerCallback(
+      event.callbackQueryId,
+      t(locale, action === 'confirm' ? 'plan_action_started_confirm' : 'plan_action_started_revise'),
+    );
+  }
+
   private async handleModeCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
     const scopeId = event.scopeId;
     if (args.length === 0) {
@@ -1189,6 +2272,9 @@ export class BridgeController {
       return;
     }
     this.store.setChatCollaborationMode(scopeId, nextMode);
+    if (nextMode !== 'plan') {
+      await this.clearPendingUserInputsIfNeeded(scopeId, locale);
+    }
     await this.sendMessage(scopeId, t(locale, 'callback_mode', {
       value: formatCollaborationModeLabel(locale, nextMode),
     }));
@@ -1205,6 +2291,7 @@ export class BridgeController {
     }
     if (normalized === 'off' || normalized === 'disable' || normalized === 'disabled' || normalized === 'default') {
       this.store.setChatCollaborationMode(event.scopeId, 'default');
+      await this.clearPendingUserInputsIfNeeded(event.scopeId, locale);
       await this.sendMessage(event.scopeId, t(locale, 'callback_mode', {
         value: formatCollaborationModeLabel(locale, 'default'),
       }));
@@ -1504,6 +2591,26 @@ export class BridgeController {
     await this.sendHtmlMessage(scopeId, text, keyboard);
   }
 
+  private async showSettingsHomePanel(scopeId: string, messageId?: number, locale = this.localeForChat(scopeId)): Promise<void> {
+    const binding = this.store.getBinding(scopeId);
+    const settings = this.store.getChatSettings(scopeId);
+    const access = this.resolveEffectiveAccess(scopeId, settings);
+    const text = formatSettingsHomeMessage(locale, {
+      threadId: binding?.threadId ?? null,
+      cwd: binding?.cwd ?? this.config.defaultCwd,
+      settings,
+      access,
+      queueDepth: this.store.countQueuedTurnInputs(scopeId),
+      activeTurnId: this.findActiveTurn(scopeId)?.turnId ?? null,
+    });
+    const keyboard = buildSettingsHomeKeyboard(locale, settings);
+    if (messageId !== undefined) {
+      await this.editHtmlMessage(scopeId, messageId, text, keyboard);
+      return;
+    }
+    await this.sendHtmlMessage(scopeId, text, keyboard);
+  }
+
   private async handleSettingsCallback(
     event: TelegramCallbackEvent,
     kind: 'model' | 'effort' | 'mode' | 'access',
@@ -1572,6 +2679,33 @@ export class BridgeController {
     await this.bot.answerCallback(event.callbackQueryId, t(locale, 'callback_effort', { effort }));
   }
 
+  private async handleGuidedPlanSettingsCallback(
+    event: TelegramCallbackEvent,
+    kind: 'plan-gate' | 'queue' | 'history',
+    rawValue: 'on' | 'off',
+    locale: AppLocale,
+  ): Promise<void> {
+    const enabled = rawValue === 'on';
+    this.store.setChatGuidedPlanPreferences(event.scopeId, kind === 'plan-gate'
+      ? { confirmPlanBeforeExecute: enabled }
+      : kind === 'queue'
+        ? { autoQueueMessages: enabled }
+        : { persistPlanHistory: enabled });
+    await this.showSettingsHomePanel(event.scopeId, event.messageId, locale);
+    await this.bot.answerCallback(
+      event.callbackQueryId,
+      t(
+        locale,
+        kind === 'plan-gate'
+          ? 'settings_plan_gate_updated'
+          : kind === 'queue'
+            ? 'settings_auto_queue_updated'
+            : 'settings_plan_history_updated',
+        { value: t(locale, enabled ? 'yes' : 'no') },
+      ),
+    );
+  }
+
   private async handleAccessSettingsCallback(event: TelegramCallbackEvent, rawValue: string, locale: AppLocale): Promise<void> {
     const scopeId = event.scopeId;
     const nextPreset = normalizeAccessPreset(rawValue);
@@ -1593,6 +2727,9 @@ export class BridgeController {
       return;
     }
     this.store.setChatCollaborationMode(event.scopeId, nextMode);
+    if (nextMode !== 'plan') {
+      await this.clearPendingUserInputsIfNeeded(event.scopeId, locale);
+    }
     await this.refreshModeSettingsPanel(event.scopeId, event.messageId, locale);
     await this.bot.answerCallback(event.callbackQueryId, t(locale, 'callback_mode', {
       value: formatCollaborationModeLabel(locale, nextMode),
@@ -1759,13 +2896,16 @@ export class BridgeController {
     }
   }
 
-  private async cleanupTransientPreview(scopeId: string, messageId: number): Promise<void> {
+  private async cleanupTransientPreview(scopeId: string, messageId: number): Promise<boolean> {
     try {
       await this.deleteMessage(scopeId, messageId);
+      return true;
     } catch (error) {
-      if (!isTelegramMessageGone(error)) {
-        this.logger.warn('telegram.preview_transient_cleanup_failed', { scopeId, messageId, error: String(error) });
+      if (isTelegramMessageGone(error)) {
+        return true;
       }
+      this.logger.warn('telegram.preview_transient_cleanup_failed', { scopeId, messageId, error: String(error) });
+      return false;
     }
   }
 
@@ -1845,7 +2985,7 @@ export class BridgeController {
 
   private renderActiveStatus(active: ActiveTurn): string {
     const locale = this.localeForChat(active.scopeId);
-    return renderActiveTurnStatus(locale, {
+    const baseStatus = renderActiveTurnStatus(locale, {
       interruptRequested: active.interruptRequested,
       pendingApprovalKinds: active.pendingApprovalKinds,
       awaitingUserInput: active.pendingUserInputId !== null,
@@ -1855,13 +2995,21 @@ export class BridgeController {
       reasoningActive: active.reasoningActiveCount > 0,
       hasStreamingReply: this.findStreamingSegment(active) !== null,
     });
+    const queuedTurns = this.store.countQueuedTurnInputs(active.scopeId);
+    return queuedTurns > 0
+      ? `${baseStatus}\n${t(locale, 'queue_status_inline', { value: queuedTurns })}`
+      : baseStatus;
   }
 
   private async dismissTurnPreview(active: ActiveTurn): Promise<void> {
     if (!active.previewActive) {
       return;
     }
-    await this.cleanupTransientPreview(active.scopeId, active.previewMessageId);
+    const cleared = await this.cleanupTransientPreview(active.scopeId, active.previewMessageId);
+    if (!cleared) {
+      this.scheduleRenderRetry(active);
+      return;
+    }
     active.previewActive = false;
     active.statusMessageText = null;
     active.statusNeedsRebase = false;
@@ -1901,27 +3049,33 @@ export class BridgeController {
       );
       active.statusMessageText = text;
       active.statusNeedsRebase = false;
+      this.clearRenderRetry(active);
     } catch (error) {
-      if (!isTelegramMessageGone(error)) {
-        this.logger.warn('telegram.preview_edit_failed', {
-          error: String(error),
-          turnId: active.turnId,
-          messageId: active.previewMessageId,
-        });
+      if (isTelegramMessageGone(error)) {
+        active.previewActive = false;
+        active.statusMessageText = null;
+        active.statusNeedsRebase = false;
+        this.store.removeActiveTurnPreview(active.turnId);
+        await this.ensureStatusMessage(active, text);
+        return;
       }
-      active.previewActive = false;
-      active.statusMessageText = null;
-      active.statusNeedsRebase = false;
-      this.store.removeActiveTurnPreview(active.turnId);
-      await this.ensureStatusMessage(active, text);
+      this.logger.warn('telegram.preview_edit_failed', {
+        error: String(error),
+        turnId: active.turnId,
+        messageId: active.previewMessageId,
+      });
+      this.scheduleRenderRetry(active);
       return;
     }
-    this.clearRenderRetry(active);
   }
 
   private async rebaseStatusMessage(active: ActiveTurn, text: string): Promise<void> {
     if (active.previewActive) {
-      await this.cleanupTransientPreview(active.scopeId, active.previewMessageId);
+      const cleared = await this.cleanupTransientPreview(active.scopeId, active.previewMessageId);
+      if (!cleared) {
+        this.scheduleRenderRetry(active);
+        return;
+      }
       active.previewActive = false;
       active.statusMessageText = null;
       this.store.removeActiveTurnPreview(active.turnId);
@@ -2102,17 +3256,30 @@ export class BridgeController {
   }
 
   private async openPendingUserInputPrompt(record: PendingUserInputRecord, locale: AppLocale): Promise<number> {
-    const currentQuestion = record.questions[record.currentQuestionIndex] ?? null;
-    const rendered = renderPendingUserInputMessage(locale, record, currentQuestion);
-    return this.sendHtmlMessage(record.chatId, rendered.html, rendered.keyboard);
+    const rendered = this.renderPendingUserInputStage(locale, record);
+    const messageId = await this.sendHtmlMessage(record.chatId, rendered.html, rendered.keyboard);
+    this.store.savePendingUserInputMessage({
+      inputLocalId: record.localId,
+      questionIndex: rendered.questionIndex,
+      messageId,
+      messageKind: rendered.messageKind,
+      createdAt: Date.now(),
+    });
+    return messageId;
   }
 
   private async refreshPendingUserInputPrompt(record: PendingUserInputRecord, locale: AppLocale): Promise<void> {
-    const currentQuestion = record.questions[record.currentQuestionIndex] ?? null;
-    const rendered = renderPendingUserInputMessage(locale, record, currentQuestion);
+    const rendered = this.renderPendingUserInputStage(locale, record);
     if (record.messageId !== null) {
       try {
         await this.editHtmlMessage(record.chatId, record.messageId, rendered.html, rendered.keyboard);
+        this.store.savePendingUserInputMessage({
+          inputLocalId: record.localId,
+          questionIndex: rendered.questionIndex,
+          messageId: record.messageId,
+          messageKind: rendered.messageKind,
+          createdAt: Date.now(),
+        });
         return;
       } catch (error) {
         if (!isTelegramMessageGone(error)) {
@@ -2121,7 +3288,38 @@ export class BridgeController {
       }
     }
     const messageId = await this.sendHtmlMessage(record.chatId, rendered.html, rendered.keyboard);
+    this.store.savePendingUserInputMessage({
+      inputLocalId: record.localId,
+      questionIndex: rendered.questionIndex,
+      messageId,
+      messageKind: rendered.messageKind,
+      createdAt: Date.now(),
+    });
     this.store.updatePendingUserInputMessage(record.localId, messageId);
+  }
+
+  private renderPendingUserInputStage(
+    locale: AppLocale,
+    record: PendingUserInputRecord,
+  ): {
+    html: string;
+    keyboard: Array<Array<{ text: string; callback_data: string }>>;
+    messageKind: 'question' | 'review';
+    questionIndex: number;
+  } {
+    if (isPendingUserInputReview(record)) {
+      return {
+        ...renderPendingUserInputReviewMessage(locale, record),
+        messageKind: 'review',
+        questionIndex: Math.max(0, record.questions.length - 1),
+      };
+    }
+    const currentQuestion = record.questions[record.currentQuestionIndex] ?? null;
+    return {
+      ...renderPendingUserInputMessage(locale, record, currentQuestion),
+      messageKind: 'question',
+      questionIndex: record.currentQuestionIndex,
+    };
   }
 
   private async finalizePendingUserInput(
@@ -2144,6 +3342,46 @@ export class BridgeController {
         }
       }
     }
+    this.updateStatus();
+  }
+
+  private async cancelPendingUserInput(record: PendingUserInputRecord, locale: AppLocale): Promise<void> {
+    await this.app.respondError(record.serverRequestId, 'User cancelled the requested input');
+    this.store.markPendingUserInputResolved(record.localId);
+    await this.clearPendingUserInputStatus(record.threadId, record.localId);
+    if (record.messageId !== null) {
+      try {
+        await this.editHtmlMessage(record.chatId, record.messageId, renderCancelledPendingUserInputMessage(locale, record), []);
+      } catch (error) {
+        if (!isTelegramMessageGone(error)) {
+          this.logger.warn('telegram.pending_input_cancel_edit_failed', {
+            localId: record.localId,
+            error: String(error),
+          });
+        }
+      }
+    }
+    this.updateStatus();
+  }
+
+  private async rewindPendingUserInput(
+    record: PendingUserInputRecord,
+    targetQuestionIndex: number,
+    locale: AppLocale,
+  ): Promise<void> {
+    const nextIndex = Math.max(0, Math.min(targetQuestionIndex, Math.max(0, record.questions.length - 1)));
+    const retainedAnswers = Object.fromEntries(
+      record.questions
+        .slice(0, nextIndex)
+        .map((question) => [question.id, record.answers[question.id]])
+        .filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].length > 0),
+    );
+    this.store.updatePendingUserInputState(record.localId, retainedAnswers, nextIndex, false);
+    const updated = this.store.getPendingUserInput(record.localId);
+    if (!updated) {
+      return;
+    }
+    await this.refreshPendingUserInputPrompt(updated, locale);
     this.updateStatus();
   }
 
@@ -2173,7 +3411,7 @@ export class BridgeController {
       this.updateStatus();
       return;
     }
-    await this.finalizePendingUserInput(updated, answers, locale);
+    await this.refreshPendingUserInputPrompt(updated, locale);
   }
 
   private async handlePendingUserInputText(
@@ -2182,6 +3420,10 @@ export class BridgeController {
     text: string,
     locale: AppLocale,
   ): Promise<void> {
+    if (isPendingUserInputReview(record)) {
+      await this.sendMessage(scopeId, t(locale, 'input_review_buttons_only'));
+      return;
+    }
     const currentQuestion = record.questions[record.currentQuestionIndex] ?? null;
     if (currentQuestion?.options?.length && !record.awaitingFreeText) {
       await this.sendMessage(
@@ -2214,8 +3456,46 @@ export class BridgeController {
       return;
     }
     const question = record.questions[record.currentQuestionIndex] ?? null;
+    if (!question && !isPendingUserInputReview(record)) {
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'input_already_resolved'));
+      return;
+    }
+    if (action === 'cancel') {
+      await this.cancelPendingUserInput(record, locale);
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'input_cancelled'));
+      return;
+    }
+    if (isPendingUserInputReview(record)) {
+      if (action === 'submit') {
+        await this.finalizePendingUserInput(record, record.answers, locale);
+        await this.bot.answerCallback(event.callbackQueryId, t(locale, 'input_submit_recorded'));
+        return;
+      }
+      const editMatch = /^edit:(\d+)$/.exec(action);
+      if (editMatch) {
+        const targetIndex = Number.parseInt(editMatch[1] || '', 10);
+        if (Number.isNaN(targetIndex)) {
+          await this.bot.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+          return;
+        }
+        await this.rewindPendingUserInput(record, targetIndex, locale);
+        await this.bot.answerCallback(event.callbackQueryId, t(locale, 'input_edit_answer_requested'));
+        return;
+      }
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
     if (!question) {
       await this.bot.answerCallback(event.callbackQueryId, t(locale, 'input_already_resolved'));
+      return;
+    }
+    if (action === 'back') {
+      if (record.currentQuestionIndex === 0) {
+        await this.bot.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
+      await this.rewindPendingUserInput(record, record.currentQuestionIndex - 1, locale);
+      await this.bot.answerCallback(event.callbackQueryId, t(locale, 'input_back_requested'));
       return;
     }
     if (action === 'other') {
@@ -2266,28 +3546,42 @@ export class BridgeController {
   }
 
   private async syncTurnPlan(active: ActiveTurn, params: any): Promise<void> {
-    const locale = this.localeForChat(active.scopeId);
-    const html = renderTurnPlanMessage(locale, params?.explanation, Array.isArray(params?.plan) ? params.plan : []);
-    if (active.planMessageId !== null && active.planText === html) {
-      return;
-    }
-    if (active.planMessageId !== null) {
-      try {
-        await this.editHtmlMessage(active.scopeId, active.planMessageId, html, []);
-        active.planText = html;
-        return;
-      } catch (error) {
-        if (!isTelegramMessageGone(error)) {
-          this.logger.warn('telegram.plan_update_edit_failed', {
-            turnId: active.turnId,
-            messageId: active.planMessageId,
-            error: String(error),
-          });
-        }
+    const explanation = typeof params?.explanation === 'string' && params.explanation.trim()
+      ? params.explanation.trim()
+      : null;
+    const steps = normalizePlanSteps(Array.isArray(params?.plan) ? params.plan : []);
+    const previousExplanation = active.planExplanation;
+    const previousSteps = active.planSteps;
+    active.planExplanation = explanation;
+    active.planSteps = steps;
+    active.planDraftText = null;
+    const session = active.guidedPlanSessionId ? this.store.getPlanSession(active.guidedPlanSessionId) : null;
+    let version = session?.latestPlanVersion ?? null;
+    const latestSnapshot = !session || session.latestPlanVersion === null
+      ? null
+      : this.store.listPlanSnapshots(session.sessionId).at(-1) ?? null;
+    const planChanged = latestSnapshot
+      ? latestSnapshot.explanation !== explanation || !planStepsEqual(latestSnapshot.steps, steps)
+      : previousExplanation !== explanation || !planStepsEqual(previousSteps, steps);
+    if (session && planChanged) {
+      version = (session.latestPlanVersion ?? 0) + 1;
+      if (this.store.getChatSettings(active.scopeId)?.persistPlanHistory ?? DEFAULT_GUIDED_PLAN_PREFERENCES.persistPlanHistory) {
+        this.store.savePlanSnapshot({
+          sessionId: session.sessionId,
+          version,
+          sourceEvent: 'turn/plan/updated',
+          explanation,
+          steps,
+          createdAt: Date.now(),
+        });
       }
     }
-    active.planMessageId = await this.sendHtmlMessage(active.scopeId, html);
-    active.planText = html;
+    if (session) {
+      this.updatePlanSession(session.sessionId, {
+        latestPlanVersion: version ?? session.latestPlanVersion,
+      });
+    }
+    await this.queuePlanRender(active);
   }
 
   private async syncDraftTurnStream(active: ActiveTurn, force: boolean): Promise<void> {
@@ -2656,12 +3950,91 @@ function escapeTelegramHtml(value: string): string {
     .replaceAll('>', '&gt;');
 }
 
-function approvalKeyboard(locale: AppLocale, localId: string): Array<Array<{ text: string; callback_data: string }>> {
-  return [[
-    { text: t(locale, 'button_allow'), callback_data: `approval:${localId}:accept` },
-    { text: t(locale, 'button_allow_session'), callback_data: `approval:${localId}:session` },
-    { text: t(locale, 'button_deny'), callback_data: `approval:${localId}:deny` },
+function approvalKeyboard(
+  locale: AppLocale,
+  localId: string,
+  detailsOpen = false,
+): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [
+      { text: t(locale, 'button_allow'), callback_data: `approval:${localId}:accept` },
+      { text: t(locale, 'button_allow_session'), callback_data: `approval:${localId}:session` },
+      { text: t(locale, 'button_deny'), callback_data: `approval:${localId}:deny` },
+    ],
+    [{
+      text: t(locale, detailsOpen ? 'button_back' : 'button_details'),
+      callback_data: `approval:${localId}:${detailsOpen ? 'back' : 'details'}`,
+    }],
+  ];
+}
+
+function planRecoveryKeyboard(
+  locale: AppLocale,
+  sessionId: string,
+): Array<Array<{ text: string; callback_data: string }>> {
+  return [
+    [{
+      text: truncateInline(`${t(locale, 'button_recommended')}: ${t(locale, 'button_continue')}`, 32),
+      callback_data: `recover:${sessionId}:continue`,
+    }],
+    [{
+      text: t(locale, 'button_show_plan'),
+      callback_data: `recover:${sessionId}:show`,
+    }],
+    [{
+      text: t(locale, 'button_cancel'),
+      callback_data: `recover:${sessionId}:cancel`,
+    }],
+  ];
+}
+
+function planConfirmationKeyboard(
+  locale: AppLocale,
+  sessionId: string,
+  canConfirm: boolean,
+): Array<Array<{ text: string; callback_data: string }>> {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  if (canConfirm) {
+    rows.push([{
+      text: truncateInline(`${t(locale, 'button_recommended')}: ${t(locale, 'button_continue')}`, 32),
+      callback_data: `plan:${sessionId}:confirm`,
+    }]);
+  }
+  rows.push([
+    { text: t(locale, 'button_revise'), callback_data: `plan:${sessionId}:revise` },
+    { text: t(locale, 'button_cancel'), callback_data: `plan:${sessionId}:cancel` },
+  ]);
+  return rows;
+}
+
+function buildPendingInputNavigationRow(
+  locale: AppLocale,
+  localId: string,
+  currentQuestionIndex: number,
+): Array<{ text: string; callback_data: string }> {
+  const row = [{ text: t(locale, 'button_cancel'), callback_data: `input:${localId}:cancel` }];
+  if (currentQuestionIndex > 0) {
+    row.unshift({ text: t(locale, 'button_back'), callback_data: `input:${localId}:back` });
+  }
+  return row;
+}
+
+function buildPendingUserInputReviewKeyboard(
+  locale: AppLocale,
+  record: PendingUserInputRecord,
+): Array<Array<{ text: string; callback_data: string }>> {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [[
+    { text: t(locale, 'button_submit'), callback_data: `input:${record.localId}:submit` },
+    { text: t(locale, 'button_cancel'), callback_data: `input:${record.localId}:cancel` },
   ]];
+  for (let index = 0; index < record.questions.length; index += 1) {
+    const question = record.questions[index]!;
+    rows.push([{
+      text: truncateInline(`${t(locale, 'input_review_edit')}: ${question.header}`, 32),
+      callback_data: `input:${record.localId}:edit:${index}`,
+    }]);
+  }
+  return rows;
 }
 
 function activeTurnKeyboard(locale: AppLocale, turnId: string): Array<Array<{ text: string; callback_data: string }>> {
@@ -2718,34 +4091,58 @@ export function renderPendingUserInputMessage(
   } else {
     lines.push(t(locale, 'input_reply_only'));
   }
+  lines.push(record.currentQuestionIndex > 0 ? t(locale, 'input_question_actions_back_cancel') : t(locale, 'input_question_actions_cancel'));
   return {
     html: lines.filter(Boolean).join('\n'),
-    keyboard: buildPendingUserInputKeyboard(locale, record.localId, question, record.awaitingFreeText),
+    keyboard: buildPendingUserInputKeyboard(locale, record, question, record.awaitingFreeText),
   };
 }
 
 function buildPendingUserInputKeyboard(
   locale: AppLocale,
-  localId: string,
+  record: PendingUserInputRecord,
   question: PendingUserInputQuestion | null,
   awaitingFreeText: boolean,
 ): Array<Array<{ text: string; callback_data: string }>> {
-  if (!question || awaitingFreeText || !question.options || question.options.length === 0) {
-    return [];
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  if (question && !awaitingFreeText && question.options && question.options.length > 0) {
+    rows.push(...question.options.map((option, index) => [{
+      text: truncateInline(
+        index === 0
+          ? `${t(locale, 'button_recommended')}: ${option.label}`
+          : option.label,
+        32,
+      ),
+      callback_data: `input:${record.localId}:option:${index}`,
+    }]));
   }
-  const rows = question.options.map((option, index) => [{
-    text: truncateInline(
-      index === 0
-        ? `${t(locale, 'button_recommended')}: ${option.label}`
-        : option.label,
-      32,
-    ),
-    callback_data: `input:${localId}:option:${index}`,
-  }]);
-  if (question.isOther) {
-    rows.push([{ text: t(locale, 'button_other'), callback_data: `input:${localId}:other` }]);
+  if (question?.isOther) {
+    rows.push([{ text: t(locale, 'button_other'), callback_data: `input:${record.localId}:other` }]);
   }
+  rows.push(buildPendingInputNavigationRow(locale, record.localId, record.currentQuestionIndex));
   return rows;
+}
+
+export function renderPendingUserInputReviewMessage(
+  locale: AppLocale,
+  record: PendingUserInputRecord,
+): { html: string; keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  const lines = [
+    `<b>${escapeTelegramHtml(t(locale, 'input_review_title'))}</b>`,
+    t(locale, 'line_thread', { value: escapeTelegramHtml(record.threadId) }),
+    t(locale, 'line_turn', { value: escapeTelegramHtml(record.turnId) }),
+    t(locale, 'input_review_prompt'),
+  ];
+  for (let index = 0; index < record.questions.length; index += 1) {
+    const question = record.questions[index]!;
+    const answer = record.answers[question.id] ?? [];
+    lines.push(`<b>${index + 1}. ${escapeTelegramHtml(question.header)}</b>`);
+    lines.push(t(locale, 'line_answer', { value: escapeTelegramHtml(answer.join(', ') || t(locale, 'empty')) }));
+  }
+  return {
+    html: lines.join('\n'),
+    keyboard: buildPendingUserInputReviewKeyboard(locale, record),
+  };
 }
 
 export function renderAnsweredPendingUserInputMessage(
@@ -2786,28 +4183,221 @@ export function renderResolvedPendingUserInputMessage(
   return lines.join('\n');
 }
 
+export function renderCancelledPendingUserInputMessage(
+  locale: AppLocale,
+  record: PendingUserInputRecord,
+): string {
+  return [
+    `<b>${escapeTelegramHtml(t(locale, 'input_cancelled'))}</b>`,
+    t(locale, 'line_thread', { value: escapeTelegramHtml(record.threadId) }),
+    t(locale, 'line_turn', { value: escapeTelegramHtml(record.turnId) }),
+  ].join('\n');
+}
+
 export function buildPendingUserInputResponse(answers: Record<string, string[]>): Record<string, { answers: string[] }> {
   return Object.fromEntries(
     Object.entries(answers).map(([questionId, value]) => [questionId, { answers: value }]),
   );
 }
 
-function renderTurnPlanMessage(locale: AppLocale, explanation: unknown, plan: Array<{ step?: unknown; status?: unknown }>): string {
+function renderTurnPlanMessage(
+  locale: AppLocale,
+  explanation: string | null,
+  plan: Array<{ step: string; status: string }>,
+  options: {
+    latestVersion?: number | null;
+    confirmedVersion?: number | null;
+    draftText?: string | null;
+  } = {},
+): string {
   const lines = [t(locale, 'plan_updated')];
-  if (typeof explanation === 'string' && explanation.trim()) {
-    lines.push(t(locale, 'plan_explanation', { value: escapeTelegramHtml(explanation.trim()) }));
+  if (options.latestVersion !== null && options.latestVersion !== undefined) {
+    lines.push(t(locale, 'plan_current_version', { value: options.latestVersion }));
+  }
+  if (options.confirmedVersion !== null && options.confirmedVersion !== undefined) {
+    lines.push(t(locale, 'plan_confirmed_version', { value: options.confirmedVersion }));
+  }
+  if (explanation) {
+    lines.push(t(locale, 'plan_explanation', { value: escapeTelegramHtml(explanation) }));
   }
   const stepLines = plan
     .map((step, index) => {
-      const label = typeof step?.step === 'string' ? step.step.trim() : '';
+      const label = step.step.trim();
       if (!label) {
         return null;
       }
-      return `${index + 1}. [${formatPlanStepStatus(locale, step?.status)}] ${escapeTelegramHtml(label)}`;
+      return `${index + 1}. [${formatPlanStepStatus(locale, step.status)}] ${escapeTelegramHtml(label)}`;
     })
     .filter((line): line is string => Boolean(line));
   if (stepLines.length > 0) {
     lines.push(`<blockquote expandable>${stepLines.join('\n')}</blockquote>`);
+  }
+  const draftText = options.draftText?.trim();
+  if (draftText) {
+    lines.push(t(locale, 'plan_streaming_update'));
+    lines.push(`<blockquote expandable>${escapeTelegramHtml(truncateInline(draftText, 1200))}</blockquote>`);
+  }
+  return lines.join('\n');
+}
+
+function normalizePlanSteps(plan: Array<{ step?: unknown; status?: unknown }>): Array<{ step: string; status: string }> {
+  return plan
+    .map((step) => ({
+      step: typeof step?.step === 'string' ? step.step.trim() : '',
+      status: typeof step?.status === 'string' ? step.status : 'pending',
+    }))
+    .filter((step) => step.step);
+}
+
+function planStepsEqual(
+  left: Array<{ step: string; status: string }>,
+  right: Array<{ step: string; status: string }>,
+): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every((step, index) => step.step === right[index]?.step && step.status === right[index]?.status);
+}
+
+export function renderPlanConfirmationMessage(
+  locale: AppLocale,
+  session: GuidedPlanSession,
+  options: { blockedExecution?: boolean } = {},
+): { html: string; keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  const hasReviewablePlan = session.latestPlanVersion !== null;
+  const lines = [
+    t(locale, 'plan_ready_for_review'),
+    t(locale, 'line_thread', { value: escapeTelegramHtml(session.threadId) }),
+  ];
+  if (session.sourceTurnId) {
+    lines.push(t(locale, 'line_turn', { value: escapeTelegramHtml(session.sourceTurnId) }));
+  }
+  if (session.latestPlanVersion !== null) {
+    lines.push(t(locale, 'plan_review_version', { value: session.latestPlanVersion }));
+  }
+  if (options.blockedExecution) {
+    lines.push(t(locale, 'plan_review_blocked_execution'));
+  }
+  lines.push(t(locale, hasReviewablePlan ? 'plan_review_prompt' : 'plan_review_prompt_no_snapshot'));
+  lines.push(t(locale, hasReviewablePlan ? 'plan_review_actions' : 'plan_review_actions_revise_only'));
+  return {
+    html: lines.filter(Boolean).join('\n'),
+    keyboard: planConfirmationKeyboard(locale, session.sessionId, hasReviewablePlan),
+  };
+}
+
+export function renderResolvedPlanConfirmationMessage(
+  locale: AppLocale,
+  session: GuidedPlanSession,
+  action: PlanSessionAction,
+): string {
+  const decisionKey = action === 'confirm'
+    ? 'plan_decision_continue'
+    : action === 'revise'
+      ? 'plan_decision_revise'
+      : 'plan_decision_cancel';
+  const lines = [
+    t(locale, 'plan_decision_recorded'),
+    t(locale, 'line_thread', { value: escapeTelegramHtml(session.threadId) }),
+  ];
+  if (session.sourceTurnId) {
+    lines.push(t(locale, 'line_turn', { value: escapeTelegramHtml(session.sourceTurnId) }));
+  }
+  if (session.latestPlanVersion !== null) {
+    lines.push(t(locale, 'plan_review_version', { value: session.latestPlanVersion }));
+  }
+  lines.push(t(locale, 'line_decision', { value: escapeTelegramHtml(t(locale, decisionKey)) }));
+  return lines.join('\n');
+}
+
+export function renderPlanRecoveryMessage(
+  locale: AppLocale,
+  session: GuidedPlanSession,
+  latestSnapshot: { version: number; explanation: string | null; steps: PlanSnapshotStep[] } | null,
+): { html: string; keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  const lines = [
+    t(locale, 'plan_recovery_title'),
+    t(locale, 'line_thread', { value: escapeTelegramHtml(session.threadId) }),
+  ];
+  if (session.sourceTurnId) {
+    lines.push(t(locale, 'line_turn', { value: escapeTelegramHtml(session.sourceTurnId) }));
+  }
+  if (latestSnapshot) {
+    lines.push(t(locale, 'plan_review_version', { value: latestSnapshot.version }));
+  }
+  lines.push(t(locale, 'plan_recovery_prompt'));
+  return {
+    html: lines.join('\n'),
+    keyboard: planRecoveryKeyboard(locale, session.sessionId),
+  };
+}
+
+export function renderResolvedPlanRecoveryMessage(
+  locale: AppLocale,
+  session: GuidedPlanSession,
+  action: PlanRecoveryAction,
+): string {
+  const lines = [
+    t(locale, 'plan_recovery_recorded'),
+    t(locale, 'line_thread', { value: escapeTelegramHtml(session.threadId) }),
+  ];
+  if (session.sourceTurnId) {
+    lines.push(t(locale, 'line_turn', { value: escapeTelegramHtml(session.sourceTurnId) }));
+  }
+  lines.push(t(locale, 'line_decision', {
+    value: escapeTelegramHtml(t(locale, action === 'continue'
+      ? 'plan_recovery_decision_continue'
+      : action === 'show'
+        ? 'plan_recovery_decision_show'
+        : 'plan_recovery_decision_cancel')),
+  }));
+  return lines.join('\n');
+}
+
+export function renderRecoveredPlanSnapshotMessage(
+  locale: AppLocale,
+  session: GuidedPlanSession,
+  snapshot: { version: number; explanation: string | null; steps: PlanSnapshotStep[] },
+): string {
+  return [
+    t(locale, 'plan_recovery_snapshot_title'),
+    t(locale, 'line_thread', { value: escapeTelegramHtml(session.threadId) }),
+    renderTurnPlanMessage(locale, snapshot.explanation, snapshot.steps, {
+      latestVersion: snapshot.version,
+      confirmedVersion: session.confirmedPlanVersion,
+    }),
+  ].join('\n');
+}
+
+function renderQueuedTurnReceiptMessage(locale: AppLocale, aheadCount: number): string {
+  return aheadCount > 0
+    ? t(locale, 'queue_receipt_with_ahead', { value: aheadCount })
+    : t(locale, 'queue_receipt_next');
+}
+
+function renderQueueStatusMessage(
+  locale: AppLocale,
+  state: {
+    activeTurnId: string | null;
+    queueDepth: number;
+    items: QueuedTurnInputRecord[];
+  },
+): string {
+  const lines = [
+    t(locale, 'queue_panel_title'),
+    t(locale, 'queue_panel_active_turn', { value: state.activeTurnId ?? t(locale, 'none') }),
+    t(locale, 'queue_panel_depth', { value: state.queueDepth }),
+  ];
+  if (state.items.length === 0) {
+    lines.push(t(locale, 'queue_panel_empty'));
+    return lines.join('\n');
+  }
+  lines.push(t(locale, 'queue_panel_list_title'));
+  state.items.slice(0, 5).forEach((item, index) => {
+    lines.push(`${index + 1}. ${item.sourceSummary || t(locale, 'queue_item_summary_fallback')}`);
+  });
+  if (state.items.length > 5) {
+    lines.push(t(locale, 'queue_panel_more_items', { value: state.items.length - 5 }));
   }
   return lines.join('\n');
 }
@@ -2822,7 +4412,7 @@ function formatPlanStepStatus(locale: AppLocale, status: unknown): string {
   return t(locale, 'plan_status_pending');
 }
 
-function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord, decision?: ApprovalAction): string {
+export function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord, decision?: ApprovalAction): string {
   const lines = [
     t(locale, 'approval_requested', {
       kind: record.kind === 'fileChange' ? t(locale, 'approval_kind_fileChange') : t(locale, 'approval_kind_command'),
@@ -2830,7 +4420,9 @@ function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord,
     t(locale, 'line_thread', { value: record.threadId }),
     t(locale, 'line_turn', { value: record.turnId }),
   ];
-  if (record.command) lines.push(t(locale, 'line_command', { value: record.command }));
+  if (record.riskLevel) lines.push(t(locale, 'line_risk', { value: t(locale, `approval_risk_${record.riskLevel}`) }));
+  if (record.summary) lines.push(t(locale, 'line_summary', { value: record.summary }));
+  if (record.command) lines.push(t(locale, 'line_command', { value: truncateInline(record.command, 120) }));
   if (record.cwd) lines.push(t(locale, 'line_cwd', { value: record.cwd }));
   if (record.reason) lines.push(t(locale, 'line_reason', { value: record.reason }));
   if (decision) {
@@ -2844,6 +4436,224 @@ function renderApprovalMessage(locale: AppLocale, record: PendingApprovalRecord,
   return lines.join('\n');
 }
 
+export function renderApprovalDetailsMessage(locale: AppLocale, record: PendingApprovalRecord): string {
+  const lines = [
+    t(locale, 'approval_details_title'),
+    t(locale, 'approval_requested', {
+      kind: record.kind === 'fileChange' ? t(locale, 'approval_kind_fileChange') : t(locale, 'approval_kind_command'),
+    }),
+    t(locale, 'line_thread', { value: record.threadId }),
+    t(locale, 'line_turn', { value: record.turnId }),
+  ];
+  if (record.riskLevel) lines.push(t(locale, 'line_risk', { value: t(locale, `approval_risk_${record.riskLevel}`) }));
+  if (record.summary) lines.push(t(locale, 'line_summary', { value: record.summary }));
+  if (record.command) lines.push(t(locale, 'line_command', { value: record.command }));
+  if (record.cwd) lines.push(t(locale, 'line_cwd', { value: record.cwd }));
+  if (record.reason) lines.push(t(locale, 'line_reason', { value: record.reason }));
+  const paths = Array.isArray(record.details?.paths)
+    ? record.details.paths.filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    : [];
+  if (paths.length > 0) {
+    lines.push(t(locale, 'line_paths', { value: truncateInline(paths.join(', '), 160) }));
+  }
+  const counts = formatApprovalChangeCounts(locale, record.details?.counts);
+  if (counts) {
+    lines.push(t(locale, 'approval_detail_counts', { value: counts }));
+  }
+  return lines.join('\n');
+}
+
+function queueControlKeyboard(locale: AppLocale): Array<Array<{ text: string; callback_data: string }>> {
+  return [[
+    { text: t(locale, 'button_queue_cancel_next'), callback_data: 'queue:next' },
+    { text: t(locale, 'button_queue_clear'), callback_data: 'queue:clear' },
+  ]];
+}
+
+function deriveApprovalDetails(
+  kind: PendingApprovalRecord['kind'],
+  params: any,
+): Pick<PendingApprovalRecord, 'summary' | 'riskLevel' | 'details'> {
+  if (kind === 'command') {
+    const commandText = typeof params?.command === 'string'
+      ? params.command
+      : Array.isArray(params?.command)
+        ? params.command.map((part: unknown) => String(part)).join(' ')
+        : null;
+    return {
+      summary: commandText ? truncateInline(commandText, 120) : 'Run a command in the workspace',
+      riskLevel: inferCommandApprovalRisk(commandText),
+      details: {
+        command: commandText,
+        cwd: typeof params?.cwd === 'string' ? params.cwd : null,
+        parsedCmd: Array.isArray(params?.parsedCmd) ? params.parsedCmd : [],
+      },
+    };
+  }
+
+  const changes = normalizeFileChangeApprovalDetails(params);
+  return {
+    summary: changes.summary,
+    riskLevel: inferFileChangeApprovalRisk(changes.paths, changes.counts),
+    details: {
+      paths: changes.paths,
+      counts: changes.counts,
+    },
+  };
+}
+
+function normalizeFileChangeApprovalDetails(params: any): {
+  paths: string[];
+  counts: { create: number; update: number; delete: number };
+  summary: string;
+} {
+  const rawChanges = Array.isArray(params?.changes)
+    ? params.changes
+    : Array.isArray(params?.edits)
+      ? params.edits
+      : [];
+  const normalized = (rawChanges as any[])
+    .map((entry: any) => ({
+      path: extractApprovalPath(entry),
+      kind: typeof entry?.kind === 'string'
+        ? entry.kind
+        : typeof entry?.type === 'string'
+          ? entry.type
+          : typeof entry?.changeType === 'string'
+            ? entry.changeType
+            : 'update',
+    }))
+    .filter((entry: { path: string | null }) => Boolean(entry.path));
+  const paths = normalized
+    .map((entry: { path: string | null }) => entry.path!)
+    .filter((path: string, index: number, values: string[]) => values.indexOf(path) === index);
+  const counts = {
+    create: normalized.filter((entry: { kind: string }) => /^(create|add|new)$/i.test(entry.kind)).length,
+    update: normalized.filter((entry: { kind: string }) => !/^(create|add|new|delete|remove)$/i.test(entry.kind)).length,
+    delete: normalized.filter((entry: { kind: string }) => /^(delete|remove)$/i.test(entry.kind)).length,
+  };
+  const summary = paths.length > 0
+    ? truncateInline(`${paths.length} file(s): ${paths.slice(0, 3).join(', ')}${paths.length > 3 ? ', ...' : ''}`, 120)
+    : 'Review proposed file changes';
+  return { paths, counts, summary };
+}
+
+function extractApprovalPath(entry: any): string | null {
+  const candidates = [
+    entry?.path,
+    entry?.filePath,
+    entry?.target,
+    entry?.newPath,
+    entry?.oldPath,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return null;
+}
+
+function inferCommandApprovalRisk(commandText: string | null): PendingApprovalRecord['riskLevel'] {
+  const normalized = (commandText ?? '').toLowerCase();
+  if (!normalized) {
+    return 'medium';
+  }
+  if (/(^|\s)(sudo|rm\s+-rf|git\s+reset\s+--hard|mkfs|dd\s+if=|shutdown|reboot)(\s|$)/.test(normalized)) {
+    return 'high';
+  }
+  if (/(^|\s)(curl|wget|npm\s+(install|update)|pnpm\s+(install|update)|yarn\s+(add|install)|chmod|chown|docker|kubectl|terraform)(\s|$)/.test(normalized)) {
+    return 'medium';
+  }
+  return 'low';
+}
+
+function inferFileChangeApprovalRisk(
+  paths: string[],
+  counts: { create: number; update: number; delete: number },
+): PendingApprovalRecord['riskLevel'] {
+  if (counts.delete > 0 || paths.some((path) => /(^|\/)(\.env|\.git|Dockerfile|docker-compose|package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock)$/i.test(path))) {
+    return 'high';
+  }
+  if (paths.length > 3 || counts.create > 0) {
+    return 'medium';
+  }
+  return 'low';
+}
+
+function formatApprovalChangeCounts(locale: AppLocale, raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const counts = raw as { create?: unknown; update?: unknown; delete?: unknown };
+  const parts: string[] = [];
+  if (Number(counts.create || 0) > 0) {
+    parts.push(locale === 'zh' ? `新增 ${Number(counts.create)} 个` : `${Number(counts.create)} create`);
+  }
+  if (Number(counts.update || 0) > 0) {
+    parts.push(locale === 'zh' ? `修改 ${Number(counts.update)} 个` : `${Number(counts.update)} update`);
+  }
+  if (Number(counts.delete || 0) > 0) {
+    parts.push(locale === 'zh' ? `删除 ${Number(counts.delete)} 个` : `${Number(counts.delete)} delete`);
+  }
+  return parts.length > 0 ? parts.join(locale === 'zh' ? '，' : ', ') : null;
+}
+
+function formatRateLimitStatusLines(locale: AppLocale, snapshot: AccountRateLimitSnapshot | null): string[] {
+  if (!snapshot) {
+    return [t(locale, 'status_rate_limits_unavailable')];
+  }
+  const lines = [
+    t(locale, 'status_account_plan', { value: snapshot.planType ?? t(locale, 'unknown') }),
+  ];
+  const windows = [snapshot.primary, snapshot.secondary]
+    .filter((window): window is NonNullable<AccountRateLimitSnapshot['primary']> => Boolean(window))
+    .sort((left, right) => (left.windowDurationMins ?? Number.MAX_SAFE_INTEGER) - (right.windowDurationMins ?? Number.MAX_SAFE_INTEGER));
+  for (const window of windows) {
+    lines.push(t(locale, 'status_rate_limit_window', {
+      label: formatRateLimitWindowLabel(locale, window.windowDurationMins),
+      used: window.usedPercent,
+      reset: formatRateLimitResetAt(locale, window.resetsAt),
+    }));
+  }
+  if (snapshot.credits && (snapshot.credits.unlimited || snapshot.credits.hasCredits || snapshot.credits.balance !== null)) {
+    lines.push(t(locale, 'status_rate_limit_credits', {
+      value: snapshot.credits.unlimited
+        ? t(locale, 'status_rate_limit_unlimited')
+        : snapshot.credits.balance ?? '0',
+    }));
+  }
+  return lines;
+}
+
+function formatRateLimitWindowLabel(locale: AppLocale, windowDurationMins: number | null): string {
+  if (windowDurationMins === 300) {
+    return locale === 'zh' ? '5小时' : '5h';
+  }
+  if (windowDurationMins === 10080) {
+    return locale === 'zh' ? '本周' : 'weekly';
+  }
+  if (windowDurationMins === null || !Number.isFinite(windowDurationMins) || windowDurationMins <= 0) {
+    return t(locale, 'unknown');
+  }
+  if (windowDurationMins % 1440 === 0) {
+    const days = Math.floor(windowDurationMins / 1440);
+    return locale === 'zh' ? `${days}天` : `${days}d`;
+  }
+  if (windowDurationMins % 60 === 0) {
+    const hours = Math.floor(windowDurationMins / 60);
+    return locale === 'zh' ? `${hours}小时` : `${hours}h`;
+  }
+  return locale === 'zh' ? `${windowDurationMins}分钟` : `${windowDurationMins}m`;
+}
+
+function formatRateLimitResetAt(locale: AppLocale, resetsAt: number | null): string {
+  if (resetsAt === null || !Number.isFinite(resetsAt) || resetsAt <= 0) {
+    return t(locale, 'unknown');
+  }
+  return new Date(resetsAt * 1000).toISOString();
+}
+
 function mapApprovalDecision(action: ApprovalAction): unknown {
   const decision = action === 'accept'
     ? 'accept'
@@ -2851,6 +4661,20 @@ function mapApprovalDecision(action: ApprovalAction): unknown {
       ? 'acceptForSession'
       : 'decline';
   return { decision };
+}
+
+function inferTelegramChatType(chatId: string): string {
+  return String(chatId).startsWith('-') ? 'supergroup' : 'private';
+}
+
+function isPendingUserInputReview(record: PendingUserInputRecord): boolean {
+  return record.currentQuestionIndex >= record.questions.length;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function toErrorMeta(error: unknown): Record<string, unknown> {

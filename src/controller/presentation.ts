@@ -100,6 +100,42 @@ export function formatAccessSettingsMessage(locale: AppLocale, access: ResolvedA
   ].join('\n');
 }
 
+export function formatSettingsHomeMessage(
+  locale: AppLocale,
+  state: {
+    threadId: string | null;
+    cwd: string | null;
+    settings: ChatSessionSettings | null;
+    access: ResolvedAccessMode;
+    queueDepth: number;
+    activeTurnId: string | null;
+  },
+): string {
+  return [
+    t(locale, 'settings_home_title'),
+    t(locale, 'settings_home_hint'),
+    '',
+    t(locale, 'settings_current_thread', { value: escapeTelegramHtml(state.threadId ?? t(locale, 'none')) }),
+    t(locale, 'line_cwd', { value: escapeTelegramHtml(state.cwd ?? t(locale, 'no_cwd')) }),
+    state.activeTurnId ? t(locale, 'settings_active_turn', { value: escapeTelegramHtml(state.activeTurnId) }) : null,
+    t(locale, 'settings_queue_depth', { value: state.queueDepth }),
+    '',
+    t(locale, 'status_configured_model', { value: escapeTelegramHtml(state.settings?.model ?? t(locale, 'server_default')) }),
+    t(locale, 'status_configured_effort', { value: escapeTelegramHtml(state.settings?.reasoningEffort ?? t(locale, 'server_default')) }),
+    t(locale, 'status_mode', { value: escapeTelegramHtml(formatCollaborationModeLabel(locale, state.settings?.collaborationMode ?? null)) }),
+    t(locale, 'status_access_preset', { value: escapeTelegramHtml(formatAccessPresetLabel(locale, state.access.preset)) }),
+    t(locale, 'settings_plan_gate', {
+      value: t(locale, (state.settings?.confirmPlanBeforeExecute ?? true) ? 'yes' : 'no'),
+    }),
+    t(locale, 'settings_auto_queue', {
+      value: t(locale, (state.settings?.autoQueueMessages ?? true) ? 'yes' : 'no'),
+    }),
+    t(locale, 'settings_plan_history', {
+      value: t(locale, (state.settings?.persistPlanHistory ?? true) ? 'yes' : 'no'),
+    }),
+  ].filter(Boolean).join('\n');
+}
+
 export function formatModeSettingsMessage(
   locale: AppLocale,
   settings: ChatSessionSettings | null,
@@ -126,6 +162,11 @@ export function buildModeSettingsKeyboard(
       text: `${current === 'plan' ? '• ' : ''}${t(locale, 'mode_plan')}`,
       callback_data: 'settings:mode:plan',
     },
+  ], [
+    {
+      text: t(locale, 'button_settings_home'),
+      callback_data: 'settings:home',
+    },
   ]];
 }
 
@@ -145,7 +186,10 @@ export function buildAccessSettingsKeyboard(locale: AppLocale, access: ResolvedA
       callback_data: 'settings:access:full-access',
     },
   ];
-  return [buttons];
+  return [buttons, [{
+    text: t(locale, 'button_settings_home'),
+    callback_data: 'settings:home',
+  }]];
 }
 
 export function formatModelSettingsMessage(
@@ -213,6 +257,38 @@ export function buildModelSettingsKeyboard(
   return [
     ...chunkButtons(modelButtons, 2),
     ...chunkButtons(effortButtons, 3),
+    [{
+      text: t(locale, 'button_settings_home'),
+      callback_data: 'settings:home',
+    }],
+  ];
+}
+
+export function buildSettingsHomeKeyboard(
+  locale: AppLocale,
+  settings: ChatSessionSettings | null,
+): InlineButton[][] {
+  const planGateOn = settings?.confirmPlanBeforeExecute ?? true;
+  const autoQueueOn = settings?.autoQueueMessages ?? true;
+  const historyOn = settings?.persistPlanHistory ?? true;
+  return [
+    [
+      { text: t(locale, 'button_models'), callback_data: 'nav:models' },
+      { text: t(locale, 'button_mode'), callback_data: 'nav:mode' },
+      { text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' },
+    ],
+    [{
+      text: t(locale, 'settings_toggle_plan_gate', { value: t(locale, planGateOn ? 'yes' : 'no') }),
+      callback_data: `settings:plan-gate:${planGateOn ? 'off' : 'on'}`,
+    }],
+    [{
+      text: t(locale, 'settings_toggle_auto_queue', { value: t(locale, autoQueueOn ? 'yes' : 'no') }),
+      callback_data: `settings:queue:${autoQueueOn ? 'off' : 'on'}`,
+    }],
+    [{
+      text: t(locale, 'settings_toggle_history', { value: t(locale, historyOn ? 'yes' : 'no') }),
+      callback_data: `settings:history:${historyOn ? 'off' : 'on'}`,
+    }],
   ];
 }
 

@@ -107,7 +107,9 @@ async function main(): Promise<void> {
         currentBindings: 0,
         pendingApprovals: 0,
         pendingUserInputs: 0,
+        queuedTurns: 0,
         activeTurns: 0,
+        accountRateLimits: null,
         lastError: null,
         updatedAt: new Date().toISOString(),
       });
