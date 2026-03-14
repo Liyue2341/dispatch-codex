@@ -27,6 +27,7 @@ export type GuidedPlanSessionState =
   | 'recovery_required';
 export type QueuedTurnInputStatus = 'queued' | 'processing' | 'completed' | 'cancelled' | 'failed';
 export type PendingUserInputMessageKind = 'question' | 'review' | 'resolved';
+export type PendingAttachmentBatchStatus = 'pending' | 'consumed' | 'cleared' | 'superseded';
 
 export interface GuidedPlanPreferences {
   confirmPlanBeforeExecute: boolean;
@@ -169,6 +170,38 @@ export interface PendingUserInputMessageRecord {
   createdAt: number;
 }
 
+export interface PendingAttachmentBatchAttachment {
+  kind: string;
+  fileId: string;
+  fileUniqueId: string;
+  fileName: string;
+  mimeType: string | null;
+  fileSize: number | null;
+  width: number | null;
+  height: number | null;
+  durationSeconds: number | null;
+  isAnimated: boolean;
+  isVideo: boolean;
+  localPath: string;
+  relativePath: string;
+  nativeImage: boolean;
+}
+
+export interface PendingAttachmentBatchRecord {
+  batchId: string;
+  scopeId: string;
+  chatId: string;
+  threadId: string;
+  mediaGroupId: string | null;
+  noteText: string;
+  attachments: PendingAttachmentBatchAttachment[];
+  receiptMessageId: number | null;
+  status: PendingAttachmentBatchStatus;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
+}
+
 export interface GuidedPlanSession {
   sessionId: string;
   chatId: string;
@@ -246,6 +279,7 @@ export interface RuntimeStatus {
   currentBindings: number;
   pendingApprovals: number;
   pendingUserInputs: number;
+  pendingAttachmentBatches: number;
   queuedTurns: number;
   activeTurns: number;
   accountRateLimits: AccountRateLimitSnapshot | null;

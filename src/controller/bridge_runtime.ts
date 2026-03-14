@@ -115,6 +115,10 @@ export class RuntimeStatusStore {
     this.lastError = value;
   }
 
+  getLastError(): string | null {
+    return this.lastError;
+  }
+
   getRuntimeStatus(): RuntimeStatus {
     const accountRateLimits = typeof (this.app as { getAccountRateLimits?: () => RuntimeStatus['accountRateLimits'] }).getAccountRateLimits === 'function'
       ? this.app.getAccountRateLimits()
@@ -127,6 +131,7 @@ export class RuntimeStatusStore {
       currentBindings: this.store.countBindings(),
       pendingApprovals: this.store.countPendingApprovals(),
       pendingUserInputs: this.store.countPendingUserInputs(),
+      pendingAttachmentBatches: this.store.countPendingAttachmentBatches(),
       queuedTurns: this.store.countQueuedTurnInputs(),
       activeTurns: this.turns.count(),
       accountRateLimits,

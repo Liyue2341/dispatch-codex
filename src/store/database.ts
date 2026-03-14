@@ -8,6 +8,7 @@ import type {
   CollaborationModeValue,
   GuidedPlanSession,
   GuidedPlanSessionState,
+  PendingAttachmentBatchRecord,
   PendingApprovalRecord,
   PendingUserInputMessageRecord,
   PendingUserInputRecord,
@@ -18,6 +19,7 @@ import type {
   ServiceTierValue,
   ThreadBinding,
 } from '../types.js';
+import { AttachmentStateRepository } from './attachment_state_repository.js';
 import { ChatStateRepository } from './chat_state_repository.js';
 import { PlanStateRepository } from './plan_state_repository.js';
 import { PreviewStateRepository } from './preview_state_repository.js';
@@ -41,6 +43,7 @@ import { WorkflowStateRepository } from './workflow_state_repository.js';
 export class BridgeStore {
   private readonly db: SqliteDatabase;
   private readonly chatState: ChatStateRepository;
+  private readonly attachments: AttachmentStateRepository;
   private readonly workflow: WorkflowStateRepository;
   private readonly plans: PlanStateRepository;
   private readonly queue: QueueStateRepository;
@@ -51,6 +54,7 @@ export class BridgeStore {
     this.db = openSqliteDatabase(dbPath);
     initializeBridgeStoreSchema(this.db);
     this.chatState = new ChatStateRepository(this.db);
+    this.attachments = new AttachmentStateRepository(this.db);
     this.workflow = new WorkflowStateRepository(this.db);
     this.plans = new PlanStateRepository(this.db);
     this.queue = new QueueStateRepository(this.db);
@@ -140,6 +144,41 @@ export class BridgeStore {
     this.workflow.savePendingApproval(record);
   }
 
+  savePendingAttachmentBatch(record: PendingAttachmentBatchRecord): void {
+    this.attachments.savePendingAttachmentBatch(record);
+  }
+
+  getPendingAttachmentBatch(batchId: string): PendingAttachmentBatchRecord | null {
+    return this.attachments.getPendingAttachmentBatch(batchId);
+  }
+
+  getLatestPendingAttachmentBatch(scopeId: string): PendingAttachmentBatchRecord | null {
+    return this.attachments.getLatestPendingAttachmentBatch(scopeId);
+  }
+
+  getPendingAttachmentBatchByMediaGroup(scopeId: string, mediaGroupId: string): PendingAttachmentBatchRecord | null {
+    return this.attachments.getPendingAttachmentBatchByMediaGroup(scopeId, mediaGroupId);
+  }
+
+  listPendingAttachmentBatches(scopeId?: string): PendingAttachmentBatchRecord[] {
+    return this.attachments.listPendingAttachmentBatches(scopeId);
+  }
+
+  updatePendingAttachmentBatchReceipt(batchId: string, receiptMessageId: number): void {
+    this.attachments.updatePendingAttachmentBatchReceipt(batchId, receiptMessageId);
+  }
+
+  resolvePendingAttachmentBatch(
+    batchId: string,
+    status: Exclude<PendingAttachmentBatchRecord['status'], 'pending'>,
+  ): void {
+    this.attachments.resolvePendingAttachmentBatch(batchId, status);
+  }
+
+  countPendingAttachmentBatches(scopeId?: string): number {
+    return this.attachments.countPendingAttachmentBatches(scopeId);
+  }
+
   updatePendingApprovalMessage(localId: string, messageId: number): void {
     this.workflow.updatePendingApprovalMessage(localId, messageId);
   }
@@ -221,6 +260,10 @@ export class BridgeStore {
     this.plans.updatePlanSessionState(sessionId, state, resolvedAt);
   }
 
+  cancelOpenPlanSessions(chatId: string, states: GuidedPlanSessionState[]): number {
+    return this.plans.cancelOpenPlanSessions(chatId, states);
+  }
+
   savePlanSnapshot(record: PlanSnapshotRecord): void {
     this.plans.savePlanSnapshot(record);
   }
@@ -249,6 +292,7 @@ export class BridgeStore {
       deletedPendingUserInputMessages:
         this.workflow.deletePendingUserInputMessagesByInputIds(pendingUserInputIdsToDelete)
         + this.workflow.deleteOrphanedPendingUserInputMessages(),
+      deletedPendingAttachmentBatches: this.attachments.deleteResolvedPendingAttachmentBatchesBefore(cutoff),
       deletedQueuedTurnInputs: this.queue.deleteHistoricalQueuedTurnInputs(cutoff),
     };
   }

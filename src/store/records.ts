@@ -26,5 +26,6 @@ export interface HistoricalCleanupResult {
   deletedPendingApprovals: number;
   deletedPendingUserInputs: number;
   deletedPendingUserInputMessages: number;
+  deletedPendingAttachmentBatches: number;
   deletedQueuedTurnInputs: number;
 }

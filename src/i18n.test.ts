@@ -15,6 +15,8 @@ test('getTelegramCommands returns localized descriptions', () => {
   assert.equal(getTelegramCommands('en').find((entry) => entry.command === 'tier')?.description, 'Service tier');
   assert.equal(getTelegramCommands('zh').find((entry) => entry.command === 'fast')?.description, '快档');
   assert.equal(getTelegramCommands('en').find((entry) => entry.command === 'mode')?.description, 'Plan/default mode');
+  assert.equal(getTelegramCommands('en').find((entry) => entry.command === 'reconnect')?.description, 'Reconnect Codex session');
+  assert.equal(getTelegramCommands('zh').find((entry) => entry.command === 'restart')?.description, '重启桥接服务');
 });
 
 test('t interpolates localized templates', () => {

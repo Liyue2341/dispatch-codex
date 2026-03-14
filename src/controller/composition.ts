@@ -5,11 +5,13 @@ import type { BridgeStore } from '../store/database.js';
 import type { CodexAppClient } from '../codex_app/client.js';
 import type { TelegramGateway } from '../telegram/gateway.js';
 import type { AppLocale } from '../types.js';
+import { AttachmentBatchCoordinator } from './attachment_batch.js';
 import { ApprovalInputCoordinator } from './approval_input.js';
 import { BridgeRuntime, RuntimeStatusStore, ThreadAttachmentRegistry, ScopeLockRegistry, TurnRegistry, notifyAsyncError } from './bridge_runtime.js';
 import { CodexIngressRouter } from './codex_ingress.js';
 import { GuidedPlanCoordinator } from './guided_plan.js';
 import { SettingsCoordinator } from './settings.js';
+import { ServiceControlCoordinator } from './service_control.js';
 import { StatusCommandCoordinator } from './status_command.js';
 import { StatusPreviewCoordinator } from './status_preview.js';
 import { TelegramIngressRouter } from './telegram_ingress.js';
@@ -31,6 +33,7 @@ export interface BridgeComposition {
   runtimeStatus: RuntimeStatusStore;
   activeTurns: TurnRegistry;
   attachedThreads: ThreadAttachmentRegistry;
+  attachmentBatches: AttachmentBatchCoordinator;
   threadPanels: ThreadPanelCoordinator;
   approvalsAndInputs: ApprovalInputCoordinator;
   guidedPlans: GuidedPlanCoordinator;
@@ -39,6 +42,7 @@ export interface BridgeComposition {
   turnLifecycle: TurnLifecycleCoordinator;
   sessions: ThreadSessionService;
   settings: SettingsCoordinator;
+  serviceControl: ServiceControlCoordinator;
   statusCommand: StatusCommandCoordinator;
   turnExecution: TurnExecutionCoordinator;
   turnGuidance: TurnGuidanceCoordinator;
@@ -244,6 +248,10 @@ export function createBridgeComposition(
     turnLifecycle,
     statusPreview,
     startTurnWithRecovery: (scopeId, binding, input, options) => sessions.startTurnWithRecovery(scopeId, binding, input, options),
+    noteTurnFailure: (message) => {
+      runtimeStatus.setSerializedLastError(message);
+      updateStatus();
+    },
     onStatusChanged: updateStatus,
   });
 
@@ -312,6 +320,27 @@ export function createBridgeComposition(
     dismissQueuedGuidancePrompt: (queueId) => refs.turnGuidance.dismissQueuedGuidancePrompt(queueId),
   });
 
+  const attachmentBatches = new AttachmentBatchCoordinator({
+    store,
+    logger,
+    turns: activeTurns,
+    messages,
+    localeForChat: (scopeId) => localeForChat(scopeId),
+    stageInboundAttachments: (binding, attachments, locale) => sessions.stageInboundAttachments(binding, attachments, locale),
+    buildTurnInputFromStagedAttachments: (text, attachments) => sessions.buildTurnInputFromStagedAttachments(text, attachments),
+    ensureBinding: async (scopeId) => {
+      const existing = store.getBinding(scopeId);
+      return existing
+        ? sessions.ensureThreadReady(scopeId, existing)
+        : sessions.createBinding(scopeId, null);
+    },
+    enqueuePreparedTurnInput: (params, locale) => refs.turnQueue.enqueuePreparedTurnInput(params, locale),
+    startIncomingTurn: (scopeId, chatId, chatType, topicId, binding, input) =>
+      refs.turnExecution.startIncomingTurn(scopeId, chatId, chatType, topicId, binding, input),
+    answerCallback: (callbackQueryId, text) => bot.answerCallback(callbackQueryId, text),
+    updateStatus,
+  });
+
   const statusCommand = new StatusCommandCoordinator({
     store,
     logger,
@@ -320,11 +349,22 @@ export function createBridgeComposition(
     activeTurnCount: () => activeTurns.count(),
     localeForChat: (scopeId) => localeForChat(scopeId),
     resolveEffectiveAccess: (scopeId) => refs.settings.resolveEffectiveAccess(scopeId),
+    lastError: () => runtimeStatus.getLastError(),
     updateStatus,
     config: {
       codexAppSyncOnOpen: config.codexAppSyncOnOpen,
       codexAppSyncOnTurnComplete: config.codexAppSyncOnTurnComplete,
     },
+  });
+
+  const serviceControl = new ServiceControlCoordinator({
+    logger,
+    app,
+    messages,
+    localeForChat: (scopeId) => localeForChat(scopeId),
+    activeTurnCount: () => activeTurns.count(),
+    runtimeStatus,
+    updateStatus,
   });
 
   const telegramRouter = new TelegramIngressRouter({
@@ -333,11 +373,13 @@ export function createBridgeComposition(
     turns: activeTurns,
     approvalsAndInputs,
     guidedPlans: refs.guidedPlans,
+    attachmentBatches,
     threadPanels,
     queue: refs.turnQueue,
     turnExecution: refs.turnExecution,
     turnGuidance: refs.turnGuidance,
     settings: refs.settings,
+    serviceControl,
     sessions,
     statusCommand,
     messages,
@@ -370,6 +412,7 @@ export function createBridgeComposition(
     activeTurns,
     attachedThreads,
     threadPanels,
+    attachmentBatches,
     approvalsAndInputs,
     guidedPlans: refs.guidedPlans,
     turnRendering: refs.turnRendering,
@@ -377,6 +420,7 @@ export function createBridgeComposition(
     turnLifecycle,
     sessions,
     settings: refs.settings,
+    serviceControl,
     statusCommand,
     turnExecution: refs.turnExecution,
     turnGuidance: refs.turnGuidance,

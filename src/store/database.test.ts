@@ -338,6 +338,54 @@ test('BridgeStore persists chat session settings', () => {
   });
 });
 
+test('BridgeStore persists pending attachment batches', () => {
+  withStore((store) => {
+    store.savePendingAttachmentBatch({
+      batchId: 'batch-1',
+      scopeId: 'chat-attach',
+      chatId: 'chat-attach',
+      threadId: 'thread-attach',
+      mediaGroupId: 'group-1',
+      noteText: 'logs and screenshots',
+      attachments: [
+        {
+          kind: 'photo',
+          fileId: 'file-1',
+          fileUniqueId: 'unique-1',
+          fileName: 'screenshot.jpg',
+          mimeType: 'image/jpeg',
+          fileSize: 512,
+          width: 1280,
+          height: 720,
+          durationSeconds: null,
+          isAnimated: false,
+          isVideo: false,
+          localPath: '/tmp/project/.telegram-inbox/screenshot.jpg',
+          relativePath: '.telegram-inbox/screenshot.jpg',
+          nativeImage: true,
+        },
+      ],
+      receiptMessageId: null,
+      status: 'pending',
+      createdAt: 1,
+      updatedAt: 1,
+      resolvedAt: null,
+    });
+
+    assert.equal(store.countPendingAttachmentBatches('chat-attach'), 1);
+    assert.equal(store.getPendingAttachmentBatchByMediaGroup('chat-attach', 'group-1')?.batchId, 'batch-1');
+    assert.equal(store.getLatestPendingAttachmentBatch('chat-attach')?.batchId, 'batch-1');
+
+    store.updatePendingAttachmentBatchReceipt('batch-1', 77);
+    assert.equal(store.getPendingAttachmentBatch('batch-1')?.receiptMessageId, 77);
+
+    store.resolvePendingAttachmentBatch('batch-1', 'consumed');
+    assert.equal(store.countPendingAttachmentBatches('chat-attach'), 0);
+    assert.equal(store.getPendingAttachmentBatch('batch-1')?.status, 'consumed');
+    assert.ok(store.getPendingAttachmentBatch('batch-1')?.resolvedAt !== null);
+  });
+});
+
 test('BridgeStore migrates chat settings to add service tier', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-store-migrate-'));
   const dbPath = path.join(tmpDir, 'bridge.sqlite');
@@ -489,6 +537,63 @@ test('BridgeStore persists guided plan sessions, snapshots, queue, and prompt me
     store.updatePlanSessionState('session-1', 'completed', 1005);
     assert.equal(store.getPlanSession('session-1')?.state, 'completed');
     assert.equal(store.getPlanSession('session-1')?.resolvedAt, 1005);
+  });
+});
+
+test('BridgeStore can cancel open plan sessions for one chat scope', () => {
+  withStore((store) => {
+    store.savePlanSession({
+      sessionId: 'session-await',
+      chatId: 'chat-6::root',
+      threadId: 'thread-1',
+      sourceTurnId: 'turn-1',
+      executionTurnId: null,
+      state: 'awaiting_plan_confirmation',
+      confirmationRequired: true,
+      confirmedPlanVersion: null,
+      latestPlanVersion: 1,
+      currentPromptId: 'prompt-1',
+      currentApprovalId: null,
+      queueDepth: 0,
+      lastPlanMessageId: 10,
+      lastPromptMessageId: 11,
+      lastApprovalMessageId: null,
+      createdAt: 1000,
+      updatedAt: 1001,
+      resolvedAt: null,
+    });
+    store.savePlanSession({
+      sessionId: 'session-keep',
+      chatId: 'chat-6::root',
+      threadId: 'thread-1',
+      sourceTurnId: 'turn-2',
+      executionTurnId: 'turn-3',
+      state: 'executing_confirmed_plan',
+      confirmationRequired: true,
+      confirmedPlanVersion: 1,
+      latestPlanVersion: 1,
+      currentPromptId: null,
+      currentApprovalId: null,
+      queueDepth: 0,
+      lastPlanMessageId: 12,
+      lastPromptMessageId: 13,
+      lastApprovalMessageId: null,
+      createdAt: 1002,
+      updatedAt: 1003,
+      resolvedAt: null,
+    });
+
+    const cancelled = store.cancelOpenPlanSessions('chat-6::root', [
+      'drafting_plan',
+      'awaiting_plan_confirmation',
+      'recovery_required',
+    ]);
+
+    assert.equal(cancelled, 1);
+    assert.equal(store.getPlanSession('session-await')?.state, 'cancelled');
+    assert.ok(store.getPlanSession('session-await')?.resolvedAt !== null);
+    assert.equal(store.getPlanSession('session-keep')?.state, 'executing_confirmed_plan');
+    assert.equal(store.getPlanSession('session-keep')?.resolvedAt, null);
   });
 });
 
@@ -708,6 +813,34 @@ test('BridgeStore cleans up resolved history and respects plan history settings'
       createdAt: recent,
       updatedAt: recent,
     });
+    store.savePendingAttachmentBatch({
+      batchId: 'batch-old',
+      scopeId: 'chat-keep',
+      chatId: 'chat-keep',
+      threadId: 'thread-chat-keep',
+      mediaGroupId: null,
+      noteText: '',
+      attachments: [],
+      receiptMessageId: null,
+      status: 'consumed',
+      createdAt: expired - 100,
+      updatedAt: expired,
+      resolvedAt: expired,
+    });
+    store.savePendingAttachmentBatch({
+      batchId: 'batch-live',
+      scopeId: 'chat-keep',
+      chatId: 'chat-keep',
+      threadId: 'thread-chat-keep',
+      mediaGroupId: null,
+      noteText: '',
+      attachments: [],
+      receiptMessageId: null,
+      status: 'pending',
+      createdAt: recent,
+      updatedAt: recent,
+      resolvedAt: null,
+    });
 
     const result = store.cleanupHistoricalRecords({
       maxResolvedAgeMs: 1000 * 60 * 60 * 24 * 30,
@@ -720,6 +853,7 @@ test('BridgeStore cleans up resolved history and respects plan history settings'
       deletedPendingApprovals: 1,
       deletedPendingUserInputs: 1,
       deletedPendingUserInputMessages: 1,
+      deletedPendingAttachmentBatches: 1,
       deletedQueuedTurnInputs: 1,
     });
 
@@ -734,6 +868,8 @@ test('BridgeStore cleans up resolved history and respects plan history settings'
     assert.equal(store.getPendingUserInput('input-old'), null);
     assert.deepEqual(store.listPendingUserInputMessages('input-old'), []);
     assert.equal(store.getPendingUserInput('input-open')?.resolvedAt, null);
+    assert.equal(store.getPendingAttachmentBatch('batch-old'), null);
+    assert.equal(store.getPendingAttachmentBatch('batch-live')?.status, 'pending');
     assert.equal(store.getQueuedTurnInput('queue-old'), null);
     assert.equal(store.getQueuedTurnInput('queue-live')?.status, 'queued');
   });

@@ -87,6 +87,20 @@ export function initializeBridgeStoreSchema(db: SqliteDatabase): void {
       created_at INTEGER NOT NULL,
       PRIMARY KEY (input_local_id, question_index, message_kind)
     );
+    CREATE TABLE IF NOT EXISTS pending_attachment_batches (
+      batch_id TEXT PRIMARY KEY,
+      scope_id TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      media_group_id TEXT,
+      note_text TEXT NOT NULL,
+      attachments_json TEXT NOT NULL,
+      receipt_message_id INTEGER,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      resolved_at INTEGER
+    );
     CREATE TABLE IF NOT EXISTS plan_sessions (
       session_id TEXT PRIMARY KEY,
       chat_id TEXT NOT NULL,
@@ -165,4 +179,12 @@ export function initializeBridgeStoreSchema(db: SqliteDatabase): void {
   ensureColumn(db, 'pending_approvals', 'summary', 'TEXT');
   ensureColumn(db, 'pending_approvals', 'risk_level', 'TEXT');
   ensureColumn(db, 'pending_approvals', 'details_json', 'TEXT');
+  ensureColumn(db, 'pending_attachment_batches', 'media_group_id', 'TEXT');
+  ensureColumn(db, 'pending_attachment_batches', 'note_text', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'pending_attachment_batches', 'attachments_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, 'pending_attachment_batches', 'receipt_message_id', 'INTEGER');
+  ensureColumn(db, 'pending_attachment_batches', 'status', "TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn(db, 'pending_attachment_batches', 'created_at', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'pending_attachment_batches', 'updated_at', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'pending_attachment_batches', 'resolved_at', 'INTEGER');
 }
