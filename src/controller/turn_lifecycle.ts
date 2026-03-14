@@ -4,7 +4,9 @@ import type { AppLocale } from '../types.js';
 import { resolveTelegramRenderRoute, type TelegramRenderRoute } from '../telegram/rendering.js';
 import { chunkTelegramMessage } from '../telegram/text.js';
 import type { GuidedPlanTurnState } from './guided_plan.js';
+import { formatTurnCompletionText, resolveTurnCompletion } from './turn_completion.js';
 import type { ToolBatchState, TurnRenderingState, TurnSegmentState } from './turn_rendering.js';
+import type { TurnCompletionState } from './turn_completion.js';
 
 export interface ActiveTurnLifecycleState extends TurnRenderingState, GuidedPlanTurnState {
   chatId: string;
@@ -13,6 +15,9 @@ export interface ActiveTurnLifecycleState extends TurnRenderingState, GuidedPlan
   queuedInputId: string | null;
   buffer: string;
   finalText: string | null;
+  completionState: TurnCompletionState;
+  completionStatusText: string | null;
+  completionErrorText: string | null;
   segments: TurnSegmentState[];
   resolver: () => void;
 }
@@ -40,7 +45,17 @@ interface TurnLifecycleHost {
   clearRenderRetry: (active: ActiveTurnLifecycleState) => void;
   clearToolBatchTimer: (batch: ToolBatchState | null) => void;
   cleanupFinishedPreview: (
-    active: Pick<ActiveTurnLifecycleState, 'scopeId' | 'previewMessageId' | 'turnId' | 'interruptRequested' | 'previewActive'>,
+    active: Pick<
+      ActiveTurnLifecycleState,
+      | 'scopeId'
+      | 'previewMessageId'
+      | 'turnId'
+      | 'interruptRequested'
+      | 'previewActive'
+      | 'completionState'
+      | 'completionStatusText'
+      | 'completionErrorText'
+    >,
     locale: AppLocale,
   ) => Promise<void>;
   retirePreviewMessage: (scopeId: string, messageId: number, text: string, turnId?: string) => Promise<void>;
@@ -90,6 +105,9 @@ export class TurnLifecycleCoordinator {
       draftText: null,
       buffer: '',
       finalText: null,
+      completionState: 'completed',
+      completionStatusText: null,
+      completionErrorText: null,
       interruptRequested: false,
       statusMessageText: null,
       statusNeedsRebase: false,
@@ -186,26 +204,31 @@ export class TurnLifecycleCoordinator {
 
   private async completeTurn(active: ActiveTurnLifecycleState): Promise<void> {
     const locale = this.host.localeForChat(active.scopeId);
+    const completion = resolveTurnCompletion({
+      state: active.completionState,
+      statusText: active.completionStatusText,
+      errorText: active.completionErrorText,
+    }, active.interruptRequested);
     let shouldMarkPartialOutput = false;
+    const rawText = active.finalText || active.buffer;
     try {
       await this.host.renderPlanCard(active);
       await this.host.queueRender(active, { forceStatus: true, forceStream: true });
       const renderedMessages = active.segments.reduce((count, segment) => count + segment.messages.length, 0);
       if (renderedMessages === 0) {
-        const fallbackKey = active.interruptRequested ? 'interrupted' : 'completed';
-        const finalChunks = chunkTelegramMessage(active.finalText || active.buffer, undefined, t(locale, fallbackKey));
+        const finalChunks = chunkTelegramMessage(rawText, undefined, formatTurnCompletionText(locale, completion, 'plain'));
         for (const chunk of finalChunks) {
           await this.host.sendMessage(active.scopeId, chunk);
         }
       }
-      shouldMarkPartialOutput = active.interruptRequested
-        && (renderedMessages > 0 || Boolean((active.finalText || active.buffer).trim()));
+      shouldMarkPartialOutput = completion.state !== 'completed'
+        && (renderedMessages > 0 || Boolean(rawText.trim()));
     } finally {
       this.host.clearRenderRetry(active);
       await this.host.cleanupFinishedPreview(active, locale);
     }
     if (shouldMarkPartialOutput) {
-      await this.host.sendMessage(active.scopeId, t(locale, 'interrupted_partial_output'));
+      await this.host.sendMessage(active.scopeId, formatTurnCompletionText(locale, completion, 'partial_output'));
     }
     if (active.queuedInputId) {
       this.host.markQueuedTurnCompleted(active.queuedInputId);

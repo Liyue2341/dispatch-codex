@@ -41,6 +41,7 @@ interface TurnExecutionHost {
       collaborationModeOverride?: 'plan' | null;
     },
   ) => Promise<{ threadId: string; turnId: string }>;
+  noteTurnFailure: (message: string) => void;
   onStatusChanged: () => void;
 }
 
@@ -169,6 +170,12 @@ export class TurnExecutionCoordinator {
         return;
       }
       case 'turn_completed': {
+        active.completionState = activity.state;
+        active.completionStatusText = activity.statusText ?? null;
+        active.completionErrorText = activity.errorText ?? null;
+        if (activity.state !== 'completed' && activity.state !== 'interrupted') {
+          this.host.noteTurnFailure(activity.errorText ?? activity.statusText ?? activity.state);
+        }
         this.host.turnRendering.promoteReadyToolBatch(active);
         await this.host.turnLifecycle.handleTurnCompleted(active);
       }

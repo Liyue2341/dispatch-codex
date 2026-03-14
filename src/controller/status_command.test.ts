@@ -104,6 +104,7 @@ function makeTextEvent(text: string): TelegramTextEvent {
   return {
     chatId: 'chat-1',
     topicId: null,
+    mediaGroupId: null,
     scopeId: 'chat-1',
     chatType: 'private',
     userId: 'user-1',
@@ -119,12 +120,29 @@ function makeTextEvent(text: string): TelegramTextEvent {
 test('/status shows 5-hour and weekly rate limit usage', async () => {
   await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gpt-5', 'medium', 'zh');
+    composition.runtimeStatus.setSerializedLastError('Insufficient quota');
+    store.savePendingAttachmentBatch({
+      batchId: 'batch-1',
+      scopeId: 'chat-1',
+      chatId: 'chat-1',
+      threadId: 'thread-1',
+      mediaGroupId: null,
+      noteText: '',
+      attachments: [],
+      receiptMessageId: null,
+      status: 'pending',
+      createdAt: 1,
+      updatedAt: 1,
+      resolvedAt: null,
+    });
 
     await composition.telegramRouter.handleCommand(makeTextEvent('/status'), 'zh', 'status', []);
 
     const text = bot.messages[0]?.text ?? '';
+    assert.match(text, /最近错误：Insufficient quota/);
     assert.match(text, /账户套餐：plus/);
     assert.match(text, /5小时额度：已用 37%/);
     assert.match(text, /本周额度：已用 81%/);
+    assert.match(text, /待处理附件批次：1/);
   });
 });

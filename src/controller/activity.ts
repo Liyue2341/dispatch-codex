@@ -1,4 +1,5 @@
 import type { JsonRpcNotification } from '../codex_app/client.js';
+import { classifyTurnCompletion, type TurnCompletionState } from './turn_completion.js';
 
 export interface RawExecCommandEvent {
   callId: string;
@@ -67,7 +68,9 @@ export type TurnActivityEvent =
   | {
       kind: 'turn_completed';
       turnId: string;
-      state: 'completed';
+      state: TurnCompletionState;
+      statusText?: string | null;
+      errorText?: string | null;
     };
 
 export function normalizeTurnActivityEvent(notification: JsonRpcNotification): TurnActivityEvent | null {
@@ -85,10 +88,13 @@ export function normalizeTurnActivityEvent(notification: JsonRpcNotification): T
     case 'turn/completed': {
       const turnId = extractTurnId(notification.params);
       if (!turnId) return null;
+      const completion = classifyTurnCompletion(notification.params);
       return {
         kind: 'turn_completed',
         turnId,
-        state: 'completed',
+        state: completion.state,
+        statusText: completion.statusText,
+        errorText: completion.errorText,
       };
     }
     default:

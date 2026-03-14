@@ -20,6 +20,7 @@ interface StatusCommandHost {
   activeTurnCount: () => number;
   localeForChat: (scopeId: string) => AppLocale;
   resolveEffectiveAccess: (scopeId: string) => { preset: string; approvalPolicy: string; sandboxMode: string };
+  lastError: () => string | null;
   updateStatus: () => void;
   config: {
     codexAppSyncOnOpen: boolean;
@@ -38,6 +39,7 @@ export class StatusCommandCoordinator {
     this.host.updateStatus();
     const lines = [
       t(locale, 'status_connected', { value: t(locale, this.host.app.isConnected() ? 'yes' : 'no') }),
+      t(locale, 'status_last_error', { value: this.host.lastError() ?? t(locale, 'none') }),
       t(locale, 'status_user_agent', { value: this.host.app.getUserAgent() ?? t(locale, 'unknown') }),
       t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
       t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
@@ -61,6 +63,7 @@ export class StatusCommandCoordinator {
       t(locale, 'status_sync_on_turn_complete', { value: t(locale, this.host.config.codexAppSyncOnTurnComplete ? 'yes' : 'no') }),
       t(locale, 'status_pending_approvals', { value: this.host.store.countPendingApprovals() }),
       t(locale, 'status_pending_user_inputs', { value: this.host.store.countPendingUserInputs() }),
+      t(locale, 'status_pending_attachment_batches', { value: this.host.store.countPendingAttachmentBatches(scopeId) }),
       t(locale, 'status_queue_depth', { value: this.host.store.countQueuedTurnInputs(scopeId) }),
       t(locale, 'status_active_turns', { value: this.host.activeTurnCount() }),
     ];
@@ -87,7 +90,7 @@ export class StatusCommandCoordinator {
   }
 }
 
-function formatRateLimitStatusLines(locale: AppLocale, snapshot: AccountRateLimitSnapshot | null): string[] {
+export function formatRateLimitStatusLines(locale: AppLocale, snapshot: AccountRateLimitSnapshot | null): string[] {
   if (!snapshot) {
     return [t(locale, 'status_rate_limits_unavailable')];
   }

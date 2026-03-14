@@ -169,3 +169,21 @@ test('ensureStatusMessage recreates preview only when old message is gone', asyn
     assert.equal(active.statusNeedsRebase, false);
   });
 });
+
+test('cleanupFinishedPreview retires failed previews with a failure-specific summary', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setChatSettings('chat-1', 'gpt-5', 'medium', 'zh');
+    bot.deleteError = new Error('Forbidden');
+
+    const active = makeActiveTurn({
+      completionState: 'quota_exhausted',
+      completionStatusText: 'failed',
+      completionErrorText: 'Insufficient quota',
+    });
+    await composition.statusPreview.cleanupFinishedPreview(active, 'zh');
+
+    assert.equal(bot.deleteCalls.length, 1);
+    assert.equal(bot.editCalls.length, 1);
+    assert.match(bot.editCalls[0]?.text ?? '', /额度已用尽/);
+  });
+});

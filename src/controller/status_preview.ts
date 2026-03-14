@@ -3,6 +3,7 @@ import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type { AppLocale } from '../types.js';
 import type { ActiveTurn, ArchivedStatusContent } from './turn_state.js';
+import { formatTurnCompletionText, resolveTurnCompletion } from './turn_completion.js';
 import { TelegramMessageService, type InlineKeyboard, isTelegramMessageGone } from './telegram_message_service.js';
 
 interface StatusPreviewHost {
@@ -39,7 +40,17 @@ export class StatusPreviewCoordinator {
   }
 
   async cleanupFinishedPreview(
-    active: Pick<ActiveTurn, 'scopeId' | 'previewMessageId' | 'turnId' | 'interruptRequested' | 'previewActive'>,
+    active: Pick<
+      ActiveTurn,
+      | 'scopeId'
+      | 'previewMessageId'
+      | 'turnId'
+      | 'interruptRequested'
+      | 'previewActive'
+      | 'completionState'
+      | 'completionStatusText'
+      | 'completionErrorText'
+    >,
     locale: AppLocale,
   ): Promise<void> {
     if (!active.previewActive) {
@@ -57,10 +68,15 @@ export class StatusPreviewCoordinator {
       this.host.logger.warn('telegram.preview_delete_failed', { error: String(error), turnId: active.turnId });
     }
 
+    const completion = resolveTurnCompletion({
+      state: active.completionState,
+      statusText: active.completionStatusText,
+      errorText: active.completionErrorText,
+    }, active.interruptRequested);
     await this.retirePreviewMessage(
       active.scopeId,
       active.previewMessageId,
-      t(locale, active.interruptRequested ? 'interrupted_see_reply_below' : 'completed_see_reply_below'),
+      formatTurnCompletionText(locale, completion, 'see_reply_below'),
       active.turnId,
     );
   }

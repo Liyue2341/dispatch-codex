@@ -91,3 +91,22 @@ test('utility classifiers keep renderer-facing categories stable', () => {
     parsedCmd: [{ type: 'read', path: 'file.txt' }],
   }), 'reading');
 });
+
+test('normalizes failed turn completion into semantic terminal states', () => {
+  const event = normalizeTurnActivityEvent({
+    method: 'turn/completed',
+    params: {
+      turnId: 'turn-2',
+      status: 'failed',
+      error: { message: 'Insufficient quota for this account' },
+    },
+  });
+
+  assert.deepEqual(event, {
+    kind: 'turn_completed',
+    turnId: 'turn-2',
+    state: 'quota_exhausted',
+    statusText: 'failed',
+    errorText: 'Insufficient quota for this account',
+  });
+});
