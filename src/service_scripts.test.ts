@@ -208,6 +208,57 @@ exec "${realUname}" "$@"
   }
 });
 
+test('macOS restart script uses kickstart instead of bootout/bootstrap for an installed launchd agent', () => {
+  const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-launchd-restart-test-'));
+  const fakeHome = path.join(tempDir, 'home');
+  const fakeBin = path.join(tempDir, 'bin');
+  const launchctlLog = path.join(tempDir, 'launchctl.log');
+  const realUname = spawnSync('sh', ['-c', 'command -v uname'], { encoding: 'utf8' }).stdout.trim() || '/usr/bin/uname';
+
+  fs.mkdirSync(fakeHome, { recursive: true });
+  fs.mkdirSync(fakeBin, { recursive: true });
+  fs.mkdirSync(path.join(fakeHome, 'Library', 'LaunchAgents'), { recursive: true });
+  fs.writeFileSync(
+    path.join(fakeHome, 'Library', 'LaunchAgents', 'com.ganxing.telegram-codex-app-bridge.plist'),
+    '<plist version="1.0"></plist>\n',
+    'utf8',
+  );
+
+  writeExecutable(path.join(fakeBin, 'launchctl'), [
+    '#!/bin/sh',
+    `printf '%s\\n' "$*" >> "${launchctlLog}"`,
+    'exit 0',
+    '',
+  ].join('\n'));
+
+  writeExecutable(path.join(fakeBin, 'uname'), [
+    '#!/bin/sh',
+    'if [ "${1:-}" = "-s" ]; then',
+    '  echo "Darwin"',
+    '  exit 0',
+    'fi',
+    `exec "${realUname}" "$@"`,
+    '',
+  ].join('\n'));
+
+  const result = spawnSync('bash', [path.join(rootDir, 'scripts/service/restart.sh')], {
+    cwd: rootDir,
+    env: {
+      ...process.env,
+      HOME: fakeHome,
+      PATH: `${fakeBin}:${process.env.PATH || ''}`,
+    },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const launchctlCalls = fs.readFileSync(launchctlLog, 'utf8');
+  assert.match(launchctlCalls, /bootstrap gui\/\d+ .*com\.ganxing\.telegram-codex-app-bridge\.plist/);
+  assert.match(launchctlCalls, /kickstart -k gui\/\d+\/com\.ganxing\.telegram-codex-app-bridge/);
+  assert.doesNotMatch(launchctlCalls, /bootout/);
+});
+
 test('restart-safe parses spaced env values and notifies the latest inbound private scope', () => {
   const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-restart-safe-test-'));

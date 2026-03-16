@@ -9,8 +9,8 @@ require_supported_platform
 case "$(platform_name)" in
   darwin)
     require_launchd_agent
-    launchctl bootout "gui/${UID}" "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/${UID}" "$LAUNCHD_PLIST"
+    launchctl bootstrap "gui/${UID}" "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
+    launchctl kickstart -k "gui/${UID}/${SERVICE_LABEL}"
     ;;
   linux)
     require_systemctl

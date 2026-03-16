@@ -51,6 +51,7 @@ cat > "$LAUNCHD_PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
-launchctl unload "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
-launchctl load "$LAUNCHD_PLIST"
+launchctl bootout "gui/${UID}" "$LAUNCHD_PLIST" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/${UID}" "$LAUNCHD_PLIST"
+launchctl kickstart -k "gui/${UID}/${SERVICE_LABEL}" >/dev/null 2>&1 || true
 echo "Installed $LAUNCHD_PLIST"
