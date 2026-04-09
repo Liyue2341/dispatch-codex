@@ -3,7 +3,7 @@ import { resolveEngineCapabilities, type EngineProvider } from '../engine/types.
 import { t } from '../i18n.js';
 import type { BridgeStore } from '../store/database.js';
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
-import type { AppLocale, GeminiApprovalModeValue, ModelInfo, ServiceTierValue } from '../types.js';
+import type { AppLocale, ModelInfo, ServiceTierValue } from '../types.js';
 import { normalizeAccessPreset, resolveAccessMode, type ResolvedAccessMode } from './access.js';
 import {
   buildAccessSettingsKeyboard,

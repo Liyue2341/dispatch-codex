@@ -49,7 +49,7 @@ test('doctor warns but does not fail when desktop open is unavailable', () => {
     'fi',
     'exit 0',
   ]);
-  const fakeWhich = createFakeCli(tempDir, 'which', [
+  createFakeCli(tempDir, 'which', [
     'if [[ "${1:-}" == "xdg-open" ]]; then',
     '  exit 1',
     'fi',

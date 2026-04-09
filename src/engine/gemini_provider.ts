@@ -6,7 +6,6 @@ import { mapGeminiToolToParsedCmdType, parseGeminiStreamLine, type GeminiStreamE
 import type { Logger } from '../logger.js';
 import { spawnCommandSync } from '../process/spawn_command.js';
 import type {
-  AccountRateLimitSnapshot,
   AppThread,
   AppThreadTurn,
   AppThreadWithTurns,
