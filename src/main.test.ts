@@ -49,12 +49,13 @@ test('doctor warns but does not fail when desktop open is unavailable', () => {
     'fi',
     'exit 0',
   ]);
-  createFakeCli(tempDir, 'which', [
-    'if [[ "${1:-}" == "xdg-open" ]]; then',
-    '  exit 1',
-    'fi',
-    'command -v "${1:-}" >/dev/null 2>&1',
-  ]);
+  const blockedOpenCommand = process.platform === 'darwin'
+    ? 'open'
+    : process.platform === 'win32'
+      ? 'cmd'
+      : 'xdg-open';
+  const lookupProgramName = process.platform === 'win32' ? 'where' : 'which';
+  createFakeCommandLookup(tempDir, lookupProgramName, blockedOpenCommand);
   const defaultCwd = path.join(tempDir, 'workspace');
   fs.mkdirSync(defaultCwd, { recursive: true });
 
@@ -134,6 +135,32 @@ function createFakeCli(tempDir: string, baseName: string, shellLines: string[]):
 
   const scriptPath = path.join(tempDir, baseName);
   const rendered = ['#!/usr/bin/env bash', 'set -euo pipefail', ...shellLines].join('\n');
+  fs.writeFileSync(scriptPath, `${rendered}\n`, { mode: 0o755 });
+  return scriptPath;
+}
+
+function createFakeCommandLookup(tempDir: string, baseName: string, blockedCommand: string): string {
+  if (process.platform === 'win32') {
+    const scriptPath = path.join(tempDir, `${baseName}.cmd`);
+    const rendered = [
+      '@echo off',
+      `if /I "%~1"=="${blockedCommand}" exit /b 1`,
+      `where.exe %* >nul 2>nul`,
+      'exit /b %errorlevel%',
+    ];
+    fs.writeFileSync(scriptPath, `${rendered.join('\r\n')}\r\n`, 'utf8');
+    return scriptPath;
+  }
+
+  const scriptPath = path.join(tempDir, baseName);
+  const rendered = [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    `if [[ "\${1:-}" == "${blockedCommand}" ]]; then`,
+    '  exit 1',
+    'fi',
+    'command -v "${1:-}" >/dev/null 2>&1',
+  ].join('\n');
   fs.writeFileSync(scriptPath, `${rendered}\n`, { mode: 0o755 });
   return scriptPath;
 }
