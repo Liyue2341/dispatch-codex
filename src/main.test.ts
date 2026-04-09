@@ -73,7 +73,11 @@ test('doctor warns but does not fail when desktop open is unavailable', () => {
   });
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /\[WARN\] desktop open unavailable:/);
+  if (process.platform === 'win32') {
+    assert.match(result.stdout, /\[OK\] desktop open available via cmd/);
+  } else {
+    assert.match(result.stdout, /\[WARN\] desktop open unavailable:/);
+  }
 });
 
 test('doctor validates gemini cli availability when gemini is configured', () => {
