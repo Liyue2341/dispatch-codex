@@ -96,6 +96,11 @@ export class ThreadSessionService {
         geminiApprovalMode: turnConfig.geminiApprovalMode,
         developerInstructions: options.developerInstructions ?? null,
       });
+      const resolvedThreadId = turn.threadId ?? binding.threadId;
+      if (resolvedThreadId !== binding.threadId) {
+        const rebound = await this.bindCachedThread(scopeId, resolvedThreadId);
+        return { threadId: rebound.threadId, turnId: turn.id };
+      }
       return { threadId: binding.threadId, turnId: turn.id };
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
@@ -124,6 +129,11 @@ export class ThreadSessionService {
         geminiApprovalMode: nextTurnConfig.geminiApprovalMode,
         developerInstructions: options.developerInstructions ?? null,
       });
+      const resolvedThreadId = turn.threadId ?? replacement.threadId;
+      if (resolvedThreadId !== replacement.threadId) {
+        const rebound = await this.bindCachedThread(scopeId, resolvedThreadId);
+        return { threadId: rebound.threadId, turnId: turn.id };
+      }
       return { threadId: replacement.threadId, turnId: turn.id };
     }
   }

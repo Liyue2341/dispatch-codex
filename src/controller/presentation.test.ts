@@ -12,6 +12,7 @@ import {
   formatAccessPresetLabel,
   formatApprovalPolicyLabel,
   formatCollaborationModeLabel,
+  formatModelDisplayName,
   formatModeSettingsMessage,
   formatModelSettingsMessage,
   formatServiceTierLabel,
@@ -257,6 +258,64 @@ test('buildModelSettingsKeyboard marks selected model and effort', () => {
     { text: '• Flex', callback_data: 'settings:tier:flex' },
   ]);
   assert.equal(keyboard.at(-1)?.[0]?.text, 'Settings');
+});
+
+test('presentation strips cliproxyapi prefix from displayed model names', () => {
+  const models: ModelInfo[] = [
+    {
+      id: 'model-gpt-5',
+      model: 'cliproxyapi/gpt-5',
+      displayName: 'cliproxyapi/gpt-5',
+      description: 'Reasoning model',
+      isDefault: true,
+      supportedReasoningEfforts: ['medium', 'high'],
+      defaultReasoningEffort: 'medium',
+    },
+  ];
+  const settings: ChatSessionSettings = {
+    chatId: 'chat-1',
+    model: 'cliproxyapi/gpt-5',
+    reasoningEffort: 'high',
+    serviceTier: 'fast',
+    locale: 'en',
+    accessPreset: null,
+    collaborationMode: null,
+    confirmPlanBeforeExecute: true,
+    autoQueueMessages: true,
+    persistPlanHistory: true,
+    updatedAt: Date.now(),
+  };
+
+  const rendered = formatModelSettingsMessage('en', models, settings);
+  const keyboard = buildModelSettingsKeyboard('en', models, settings);
+
+  assert.equal(formatModelDisplayName('cliproxyapi/gpt-5'), 'gpt-5');
+  assert.match(rendered, /Model: <b>gpt-5<\/b>/);
+  assert.match(rendered, /Current default target: <code>gpt-5<\/code>/);
+  assert.equal(keyboard[0]?.[1]?.text, '• gpt-5');
+  assert.equal(resolveRequestedModel(models, 'gpt-5')?.model, 'cliproxyapi/gpt-5');
+});
+
+test('presentation strips generic provider prefixes from OpenCode model names', () => {
+  const models: ModelInfo[] = [
+    {
+      id: 'cliproxy/gemini-3-pro-preview',
+      model: 'cliproxy/gemini-3-pro-preview',
+      displayName: 'Cliproxy: Gemini 3 Pro Preview',
+      description: 'OpenCode provider model',
+      isDefault: true,
+      supportedReasoningEfforts: [],
+      defaultReasoningEffort: 'none',
+    },
+  ];
+
+  const rendered = formatModelSettingsMessage('zh', models, null);
+  const keyboard = buildModelSettingsKeyboard('zh', models, null);
+
+  assert.equal(formatModelDisplayName('cliproxy/gemini-3-pro-preview'), 'gemini-3-pro-preview');
+  assert.match(rendered, /当前默认目标：<code>gemini-3-pro-preview<\/code>/);
+  assert.equal(keyboard[0]?.[1]?.text, 'gemini-3-pr...');
+  assert.equal(resolveRequestedModel(models, 'gemini-3-pro-preview')?.model, 'cliproxy/gemini-3-pro-preview');
 });
 
 test('resolveRequestedModel matches model ids and display names', () => {

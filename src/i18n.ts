@@ -14,6 +14,7 @@ const EN_MESSAGES = {
     engine_codex: 'Codex',
     engine_gemini: 'Gemini CLI',
     engine_claude: 'Claude Code',
+    engine_opencode: 'OpenCode',
     help_commands_title: 'Commands:',
     help_advanced_aliases: 'Advanced aliases: /model, /effort, /tier, /fast, /access, /plan',
     help_plain_text_hint: 'Plain text continues the thread. Photos and files are saved first, then used when you send your next message.',
@@ -474,6 +475,7 @@ const ZH_MESSAGES = {
     engine_codex: 'Codex',
     engine_gemini: 'Gemini CLI',
     engine_claude: 'Claude Code',
+    engine_opencode: 'OpenCode',
     help_commands_title: '命令列表：',
     help_advanced_aliases: '高级别名：/model、/effort、/tier、/fast、/access、/plan',
     help_plain_text_hint: '直接发送普通文本会继续当前线程。图片和文件会先保存，等你下一条消息再一起带给当前 bot。',
@@ -932,6 +934,10 @@ const FR_MESSAGES = {
   unknown: 'inconnu',
   server_default: 'par defaut serveur',
   no_cwd: '(aucun cwd)',
+  engine_codex: 'Codex',
+  engine_gemini: 'Gemini CLI',
+  engine_claude: 'Claude Code',
+  engine_opencode: 'OpenCode',
   help_commands_title: 'Commandes :',
   help_advanced_aliases: 'Alias avances : /model, /effort, /tier, /fast, /access, /plan',
   help_plain_text_hint: 'Le texte simple continue le fil. Les photos et fichiers sont d abord sauvegardes puis utilises avec votre prochain message.',
@@ -1220,7 +1226,7 @@ export function t(locale: AppLocale, key: MessageKey, params: MessageParams = {}
 
 export function getTelegramCommands(
   locale: AppLocale,
-  engine: 'codex' | 'gemini' | 'claude' = 'codex',
+  engine: 'codex' | 'gemini' | 'claude' | 'opencode' = 'codex',
   options: { restart?: boolean } = {},
 ): Array<{ command: string; description: string }> {
   const includeRestart = options.restart ?? true;
@@ -1251,6 +1257,22 @@ export function getTelegramCommands(
       { command: 'settings', description: t(locale, 'cmd_desc_settings') },
       ...(includeRestart ? [{ command: 'restart', description: t(locale, 'cmd_desc_restart') }] : []),
       { command: 'queue', description: t(locale, 'cmd_desc_queue') },
+      { command: 'where', description: t(locale, 'cmd_desc_where') },
+      { command: 'interrupt', description: t(locale, 'cmd_desc_interrupt') },
+    ];
+  }
+  if (engine === 'opencode') {
+    return [
+      { command: 'help', description: t(locale, 'cmd_desc_help') },
+      { command: 'status', description: t(locale, 'cmd_desc_status') },
+      { command: 'threads', description: t(locale, 'cmd_desc_threads') },
+      { command: 'open', description: t(locale, 'cmd_desc_open') },
+      { command: 'new', description: t(locale, 'cmd_desc_new') },
+      { command: 'models', description: t(locale, 'cmd_desc_models') },
+      { command: 'settings', description: t(locale, 'cmd_desc_settings') },
+      ...(includeRestart ? [{ command: 'restart', description: t(locale, 'cmd_desc_restart') }] : []),
+      { command: 'queue', description: t(locale, 'cmd_desc_queue') },
+      { command: 'permissions', description: t(locale, 'cmd_desc_permissions') },
       { command: 'where', description: t(locale, 'cmd_desc_where') },
       { command: 'interrupt', description: t(locale, 'cmd_desc_interrupt') },
     ];

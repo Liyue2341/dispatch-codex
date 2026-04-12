@@ -65,6 +65,7 @@ export interface TurnRenderingState {
   renderRequested: boolean;
   forceStatusFlush: boolean;
   forceStreamFlush: boolean;
+  preferStatusBeforeStream: boolean;
   renderTask: Promise<void> | null;
 }
 
@@ -95,12 +96,13 @@ export class TurnRenderingCoordinator {
 
   async queueRender(
     active: TurnRenderingState,
-    options: { forceStatus?: boolean; forceStream?: boolean } = {},
+    options: { forceStatus?: boolean; forceStream?: boolean; preferStatusBeforeStream?: boolean } = {},
   ): Promise<void> {
     this.clearRenderRetry(active);
     active.renderRequested = true;
     active.forceStatusFlush = active.forceStatusFlush || Boolean(options.forceStatus);
     active.forceStreamFlush = active.forceStreamFlush || Boolean(options.forceStream);
+    active.preferStatusBeforeStream = active.preferStatusBeforeStream || Boolean(options.preferStatusBeforeStream);
     if (active.renderTask) {
       await active.renderTask;
       return;
@@ -109,11 +111,18 @@ export class TurnRenderingCoordinator {
       while (active.renderRequested) {
         const forceStatus = active.forceStatusFlush;
         const forceStream = active.forceStreamFlush;
+        const preferStatusBeforeStream = active.preferStatusBeforeStream;
         active.renderRequested = false;
         active.forceStatusFlush = false;
         active.forceStreamFlush = false;
-        await this.syncTurnStream(active, forceStream);
-        await this.host.syncTurnStatus(active, forceStatus);
+        active.preferStatusBeforeStream = false;
+        if (preferStatusBeforeStream) {
+          await this.host.syncTurnStatus(active, forceStatus);
+          await this.syncTurnStream(active, forceStream);
+        } else {
+          await this.syncTurnStream(active, forceStream);
+          await this.host.syncTurnStatus(active, forceStatus);
+        }
       }
     })().finally(() => {
       active.renderTask = null;
@@ -410,6 +419,9 @@ function formatToolBatchStatus(
   inProgress: boolean,
 ): string {
   const heading = formatToolBatchHeading(locale, counts, inProgress);
+  if (inProgress) {
+    return heading;
+  }
   const detailLines = actionLines.slice(0, 6);
   if (detailLines.length === 0) {
     return heading;

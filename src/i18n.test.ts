@@ -30,6 +30,8 @@ test('getTelegramCommands returns localized descriptions', () => {
   assert.equal(getTelegramCommands('en', 'claude').find((entry) => entry.command === 'threads')?.description, 'Recent threads');
   assert.equal(getTelegramCommands('en', 'claude').find((entry) => entry.command === 'mode'), undefined);
   assert.equal(getTelegramCommands('fr', 'claude').find((entry) => entry.command === 'settings')?.description, 'Parametres unifies');
+  assert.equal(getTelegramCommands('en', 'opencode').find((entry) => entry.command === 'permissions')?.description, 'Access settings');
+  assert.equal(getTelegramCommands('en', 'opencode').find((entry) => entry.command === 'mode'), undefined);
 });
 
 test('t interpolates localized templates', () => {
@@ -38,5 +40,6 @@ test('t interpolates localized templates', () => {
   assert.equal(t('en', 'engine_codex'), 'Codex');
   assert.equal(t('zh', 'engine_gemini'), 'Gemini CLI');
   assert.equal(t('en', 'engine_claude'), 'Claude Code');
+  assert.equal(t('en', 'engine_opencode'), 'OpenCode');
   assert.equal(t('en', 'attachment_batch_resolved_started'), 'Started using these attachments with this bot.');
 });

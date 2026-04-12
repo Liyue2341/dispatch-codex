@@ -19,10 +19,22 @@ function makeConfig(engine: AppConfig['bridgeEngine']): AppConfig {
     tgAllowedTopicId: null,
     codexCliBin: 'codex',
     geminiCliBin: 'gemini',
+    claudeCliBin: 'claude',
+    opencodeCliBin: 'opencode',
     geminiDefaultModel: 'gemini-3-pro-preview',
     geminiModelAllowlist: ['gemini-3-pro-preview'],
     geminiIncludeDirectories: [],
     geminiHeadlessTimeoutMs: 300_000,
+    claudeDefaultModel: 'sonnet',
+    claudeModelAllowlist: ['sonnet'],
+    claudeIncludeDirectories: [],
+    claudeAllowedTools: [],
+    claudePermissionMode: 'default',
+    claudeHeadlessTimeoutMs: 300_000,
+    opencodeDefaultModel: null,
+    opencodeDefaultAgent: 'build',
+    opencodeServerHostname: '127.0.0.1',
+    opencodeServerPort: 4096,
     codexAppAutolaunch: false,
     codexAppLaunchCmd: '',
     codexAppSyncOnOpen: false,
@@ -66,4 +78,13 @@ test('createEngineProvider returns a claude provider for claude instances', () =
   );
 
   assert.equal(provider.engine, 'claude');
+});
+
+test('createEngineProvider returns an opencode provider for opencode instances', () => {
+  const provider = createEngineProvider(
+    makeConfig('opencode'),
+    new Logger('error', path.join(os.tmpdir(), 'telegram-opencode-engine-factory.log')),
+  );
+
+  assert.equal(provider.engine, 'opencode');
 });

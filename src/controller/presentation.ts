@@ -168,7 +168,7 @@ export function formatWhereMessage(
     t(locale, 'where_thread', { value: thread.threadId }),
     t(locale, 'where_title', { value: thread.name || t(locale, 'untitled') }),
     t(locale, 'where_preview', { value: thread.preview || t(locale, 'empty') }),
-    t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+    t(locale, 'where_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
     showEffort ? t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }) : null,
     showServiceTier ? t(locale, 'where_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }) : null,
     showMode ? t(locale, 'where_mode', { value: formatEngineModeLabel(locale, engine, settings) }) : null,
@@ -231,7 +231,9 @@ export function formatSettingsHomeMessage(
     state.activeTurnId ? t(locale, 'settings_active_turn', { value: escapeTelegramHtml(state.activeTurnId) }) : null,
     t(locale, 'settings_queue_depth', { value: state.queueDepth }),
     '',
-    t(locale, 'status_configured_model', { value: escapeTelegramHtml(state.settings?.model ?? t(locale, 'server_default')) }),
+    t(locale, 'status_configured_model', {
+      value: escapeTelegramHtml(formatModelDisplayName(state.settings?.model) ?? t(locale, 'server_default')),
+    }),
     showEffort
       ? t(locale, 'status_configured_effort', { value: escapeTelegramHtml(state.settings?.reasoningEffort ?? t(locale, 'server_default')) })
       : null,
@@ -355,7 +357,7 @@ export function formatModelSettingsMessage(
   const showEffort = options.showEffort ?? true;
   const showServiceTier = options.showServiceTier ?? true;
   const selectedModel = resolveCurrentModel(models, settings?.model ?? null);
-  const selectedModelLabel = settings?.model ?? t(locale, 'server_default');
+  const selectedModelLabel = formatModelDisplayName(settings?.model) ?? t(locale, 'server_default');
   const selectedEffort = settings?.reasoningEffort ?? null;
   const selectedServiceTier = settings?.serviceTier ?? null;
   const supportedEfforts = selectedModel?.supportedReasoningEfforts.length
@@ -371,7 +373,11 @@ export function formatModelSettingsMessage(
     t(locale, 'models_model', { value: escapeTelegramHtml(selectedModelLabel) }),
     showEffort ? t(locale, 'models_effort', { value: escapeTelegramHtml(selectedEffort ?? t(locale, 'server_default')) }) : null,
     showServiceTier ? t(locale, 'models_service_tier', { value: escapeTelegramHtml(formatServiceTierLabel(locale, selectedServiceTier)) }) : null,
-    selectedModel ? t(locale, 'models_current_default_target', { value: escapeTelegramHtml(selectedModel.model) }) : null,
+    selectedModel
+      ? t(locale, 'models_current_default_target', {
+          value: escapeTelegramHtml(formatModelDisplayName(selectedModel.model) ?? selectedModel.model),
+        })
+      : null,
     showEffort && supportedEfforts.length > 0
       ? t(locale, 'models_supported_efforts', { value: escapeTelegramHtml(supportedEfforts.join(', ')) })
       : showEffort
@@ -405,7 +411,7 @@ export function buildModelSettingsKeyboard(
       callback_data: 'settings:model:default',
     },
     ...models.map((model) => ({
-      text: `${currentModel === model.model ? '• ' : ''}${truncate(model.model, 14)}`,
+      text: `${currentModel === model.model ? '• ' : ''}${truncate(formatModelDisplayName(model.model) ?? model.model, 14)}`,
       callback_data: `settings:model:${encodeURIComponent(model.model)}`,
     })),
   ];
@@ -487,6 +493,7 @@ export function resolveRequestedModel(models: ModelInfo[], requested: string): M
   const normalized = requested.trim().toLowerCase();
   return models.find(model => (
     model.model.toLowerCase() === normalized
+    || (formatModelDisplayName(model.model)?.toLowerCase() ?? '') === normalized
     || model.id.toLowerCase() === normalized
     || model.displayName.toLowerCase() === normalized
   )) ?? null;
@@ -584,6 +591,9 @@ export function formatBridgeEngineLabel(locale: AppLocale, engine: BridgeEngineV
   if (engine === 'claude') {
     return t(locale, 'engine_claude');
   }
+  if (engine === 'opencode') {
+    return t(locale, 'engine_opencode');
+  }
   return t(locale, 'engine_codex');
 }
 
@@ -603,6 +613,12 @@ export function formatServiceTierLabel(locale: AppLocale, tier: ServiceTierValue
   if (tier === 'fast') return t(locale, 'service_tier_fast');
   if (tier === 'flex') return t(locale, 'service_tier_flex');
   return t(locale, 'server_default');
+}
+
+export function formatModelDisplayName(model: string | null | undefined): string | null {
+  if (!model) return null;
+  const stripped = model.replace(/^[^/]+\//, '');
+  return stripped.length > 0 ? stripped : model;
 }
 
 export function formatSandboxModeLabel(locale: AppLocale, mode: SandboxModeValue): string {

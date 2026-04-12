@@ -76,6 +76,7 @@ export interface SteerTurnOptions {
 export interface TurnStartResult {
   id: string;
   status: string;
+  threadId?: string;
 }
 
 export interface TurnSteerResult {
@@ -116,7 +117,7 @@ export function resolveEngineCapabilities(
 }
 
 export interface EngineProvider {
-  readonly engine: 'codex' | 'gemini' | 'claude';
+  readonly engine: 'codex' | 'gemini' | 'claude' | 'opencode';
   readonly capabilities: EngineCapabilities;
 
   on(event: 'notification', listener: (message: EngineNotification) => void): this;

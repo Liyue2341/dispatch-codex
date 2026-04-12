@@ -17,7 +17,7 @@ const loggerStub = {
 };
 
 test('TelegramGateway emits media messages with caption and attachments', async () => {
-  const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any);
+  const gateway = new TelegramGateway('token', '42', null, null, 1000, storeStub as any, loggerStub as any);
   const events: TelegramTextEvent[] = [];
   gateway.on('text', (event: TelegramTextEvent) => {
     events.push(event);
@@ -62,7 +62,7 @@ test('TelegramGateway emits media messages with caption and attachments', async 
 });
 
 test('TelegramGateway emits document-only messages with empty text', async () => {
-  const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any);
+  const gateway = new TelegramGateway('token', '42', null, null, 1000, storeStub as any, loggerStub as any);
   const events: TelegramTextEvent[] = [];
   gateway.on('text', (event: TelegramTextEvent) => {
     events.push(event);
@@ -93,7 +93,7 @@ test('TelegramGateway emits document-only messages with empty text', async () =>
 });
 
 test('TelegramGateway emits topic messages for the configured group chat', async () => {
-  const gateway = new TelegramGateway('token', '42', '-100123', 1000, storeStub as any, loggerStub as any);
+  const gateway = new TelegramGateway('token', '42', '-100123', 8, 1000, storeStub as any, loggerStub as any);
   const events: TelegramTextEvent[] = [];
   gateway.on('text', (event: TelegramTextEvent) => {
     events.push(event);
@@ -128,7 +128,7 @@ test('TelegramGateway emits topic messages for the configured group chat', async
 });
 
 test('TelegramGateway still emits private chat messages when a group chat is configured', async () => {
-  const gateway = new TelegramGateway('token', '42', '-100123', 1000, storeStub as any, loggerStub as any);
+  const gateway = new TelegramGateway('token', '42', '-100123', 8, 1000, storeStub as any, loggerStub as any);
   const events: TelegramTextEvent[] = [];
   gateway.on('text', (event: TelegramTextEvent) => {
     events.push(event);
@@ -150,8 +150,29 @@ test('TelegramGateway still emits private chat messages when a group chat is con
   assert.equal(events[0]?.topicId, null);
 });
 
+test('TelegramGateway ignores group topic messages outside the configured topic', async () => {
+  const gateway = new TelegramGateway('token', '42', '-100123', 8, 1000, storeStub as any, loggerStub as any);
+  const events: TelegramTextEvent[] = [];
+  gateway.on('text', (event: TelegramTextEvent) => {
+    events.push(event);
+  });
+
+  await (gateway as any).handleUpdate({
+    update_id: 5,
+    message: {
+      message_id: 14,
+      message_thread_id: 9,
+      chat: { id: -100123, type: 'supergroup' },
+      from: { id: 42 },
+      text: 'wrong topic',
+    },
+  });
+
+  assert.equal(events.length, 0);
+});
+
 test('TelegramGateway invalidates the previous polling session after stop/start', async () => {
-  const gateway = new TelegramGateway('token', '42', null, 1000, storeStub as any, loggerStub as any);
+  const gateway = new TelegramGateway('token', '42', null, null, 1000, storeStub as any, loggerStub as any);
   const pollSessionIds: number[] = [];
   (gateway as any).resolveBotIdentity = async () => {};
   (gateway as any).registerCommands = async () => {};

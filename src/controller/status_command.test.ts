@@ -218,3 +218,15 @@ test('/status hides Codex-only sections for Gemini instances', async () => {
     }),
   });
 });
+
+test('/status strips cliproxyapi prefix from configured model display', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setChatSettings('chat-1', 'cliproxyapi/gpt-5', 'medium', 'zh');
+
+    await composition.telegramRouter.handleCommand(makeTextEvent('/status'), 'zh', 'status', []);
+
+    const text = bot.messages[0]?.text ?? '';
+    assert.match(text, /已配置模型：gpt-5/);
+    assert.doesNotMatch(text, /cliproxyapi\/gpt-5/);
+  });
+});

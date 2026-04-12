@@ -186,6 +186,9 @@ function Resolve-BridgeEngine {
   if ($normalized -eq 'claude') {
     return 'claude'
   }
+  if ($normalized -eq 'opencode') {
+    return 'opencode'
+  }
 
   return 'codex'
 }
@@ -239,6 +242,9 @@ function Format-EngineDisplayName {
   }
   if ($BridgeEngine -eq 'claude') {
     return 'Claude'
+  }
+  if ($BridgeEngine -eq 'opencode') {
+    return 'OpenCode'
   }
 
   return 'Codex'

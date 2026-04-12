@@ -40,7 +40,7 @@ interface TurnLifecycleHost {
   listStoredPreviews: () => StoredPreviewRecord[];
   queueRender: (
     active: ActiveTurnLifecycleState,
-    options?: { forceStatus?: boolean; forceStream?: boolean },
+    options?: { forceStatus?: boolean; forceStream?: boolean; preferStatusBeforeStream?: boolean },
   ) => Promise<void>;
   clearRenderRetry: (active: ActiveTurnLifecycleState) => void;
   clearToolBatchTimer: (batch: ToolBatchState | null) => void;
@@ -134,6 +134,7 @@ export class TurnLifecycleCoordinator {
       renderRequested: false,
       forceStatusFlush: false,
       forceStreamFlush: false,
+      preferStatusBeforeStream: false,
       renderTask: null,
       resolver: resolveTurn,
     };
@@ -143,7 +144,11 @@ export class TurnLifecycleCoordinator {
     }
     this.host.updateStatus();
     try {
-      await this.host.queueRender(active, { forceStatus: true, forceStream: true });
+      await this.host.queueRender(active, {
+        forceStatus: true,
+        forceStream: true,
+        preferStatusBeforeStream: true,
+      });
     } catch (error) {
       this.host.logger.warn('telegram.preview_keyboard_attach_failed', { error: String(error), turnId });
     }

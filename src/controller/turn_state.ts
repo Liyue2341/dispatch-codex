@@ -80,6 +80,7 @@ export interface ActiveTurn {
   renderRequested: boolean;
   forceStatusFlush: boolean;
   forceStreamFlush: boolean;
+  preferStatusBeforeStream: boolean;
   renderTask: Promise<void> | null;
   resolver: () => void;
 }

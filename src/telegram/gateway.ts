@@ -109,6 +109,7 @@ export class TelegramGateway extends EventEmitter {
     private readonly botToken: string,
     private readonly allowedUserId: string,
     private readonly allowedChatId: string | null,
+    private readonly allowedTopicId: number | null,
     private readonly pollIntervalMs: number,
     private readonly store: BridgeStore,
     private readonly logger: Logger,
@@ -335,7 +336,7 @@ export class TelegramGateway extends EventEmitter {
   }
 
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
-    if (update.message && update.message.from && this.isAllowedChat(update.message.chat)) {
+    if (update.message && update.message.from && this.isAllowedChat(update.message.chat, update.message.message_thread_id ?? null)) {
       if (String(update.message.from.id) !== this.allowedUserId) return;
       const attachments = extractAttachments(update.message);
       const text = update.message.text ?? update.message.caption ?? '';
@@ -365,8 +366,8 @@ export class TelegramGateway extends EventEmitter {
 
     if (update.callback_query?.data && update.callback_query.from && update.callback_query.message) {
       if (String(update.callback_query.from.id) !== this.allowedUserId) return;
-      if (!this.isAllowedChat(update.callback_query.message.chat)) return;
       const topicId = update.callback_query.message.message_thread_id ?? null;
+      if (!this.isAllowedChat(update.callback_query.message.chat, topicId)) return;
       this.emit('callback', {
         chatId: String(update.callback_query.message.chat.id),
         topicId,
@@ -380,12 +381,18 @@ export class TelegramGateway extends EventEmitter {
     }
   }
 
-  private isAllowedChat(chat: TelegramChat): boolean {
+  private isAllowedChat(chat: TelegramChat, topicId: number | null): boolean {
     if (chat.type === 'private') {
       return true;
     }
     if (this.allowedChatId) {
-      return String(chat.id) === this.allowedChatId;
+      if (String(chat.id) !== this.allowedChatId) {
+        return false;
+      }
+      if (this.allowedTopicId !== null) {
+        return topicId === this.allowedTopicId;
+      }
+      return true;
     }
     return false;
   }

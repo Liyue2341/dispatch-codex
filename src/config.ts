@@ -7,7 +7,7 @@ import type { LogLevel } from './logger.js';
 import { detectPlatformCapabilities, getCommandLookupProgram, type PlatformCapabilities } from './platform/capabilities.js';
 import type { ApprovalPolicyValue, SandboxModeValue } from './types.js';
 
-export type BridgeEngineValue = 'codex' | 'gemini' | 'claude';
+export type BridgeEngineValue = 'codex' | 'gemini' | 'claude' | 'opencode';
 
 export const LEGACY_APP_HOME = path.join(os.homedir(), '.telegram-codex-app-bridge');
 export const INSTANCES_APP_HOME = path.join(LEGACY_APP_HOME, 'instances');
@@ -25,6 +25,7 @@ export interface AppConfig {
   codexCliBin: string;
   geminiCliBin: string;
   claudeCliBin?: string;
+  opencodeCliBin?: string;
   geminiDefaultModel: string | null;
   geminiModelAllowlist: string[];
   geminiIncludeDirectories: string[];
@@ -35,6 +36,10 @@ export interface AppConfig {
   claudeAllowedTools?: string[];
   claudePermissionMode?: 'default' | 'acceptEdits' | 'auto' | 'bypassPermissions' | 'dontAsk' | 'plan';
   claudeHeadlessTimeoutMs?: number;
+  opencodeDefaultModel?: string | null;
+  opencodeDefaultAgent?: string | null;
+  opencodeServerHostname?: string | null;
+  opencodeServerPort?: number | null;
   codexAppAutolaunch: boolean;
   codexAppLaunchCmd: string;
   codexAppSyncOnOpen: boolean;
@@ -69,6 +74,7 @@ export function loadConfig(): AppConfig {
     codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
     geminiCliBin: process.env.GEMINI_CLI_BIN || resolveCommand('gemini') || 'gemini',
     claudeCliBin: process.env.CLAUDE_CLI_BIN || resolveCommand('claude') || 'claude',
+    opencodeCliBin: process.env.OPENCODE_CLI_BIN || resolveCommand('opencode') || 'opencode',
     geminiDefaultModel: optional('GEMINI_DEFAULT_MODEL'),
     geminiModelAllowlist: listEnv('GEMINI_MODEL_ALLOWLIST'),
     geminiIncludeDirectories: listEnv('GEMINI_INCLUDE_DIRECTORIES'),
@@ -79,6 +85,10 @@ export function loadConfig(): AppConfig {
     claudeAllowedTools: listEnv('CLAUDE_ALLOWED_TOOLS'),
     claudePermissionMode: parseClaudePermissionMode(process.env.CLAUDE_PERMISSION_MODE || 'default'),
     claudeHeadlessTimeoutMs: intEnv('CLAUDE_HEADLESS_TIMEOUT_MS', 15 * 60 * 1000),
+    opencodeDefaultModel: optional('OPENCODE_DEFAULT_MODEL'),
+    opencodeDefaultAgent: optional('OPENCODE_DEFAULT_AGENT'),
+    opencodeServerHostname: optional('OPENCODE_SERVER_HOSTNAME') ?? '127.0.0.1',
+    opencodeServerPort: nullableIntEnv('OPENCODE_SERVER_PORT'),
     codexAppAutolaunch: boolEnv('CODEX_APP_AUTOLAUNCH', platform.os === 'darwin'),
     codexAppLaunchCmd: process.env.CODEX_APP_LAUNCH_CMD || '',
     codexAppSyncOnOpen: boolEnv('CODEX_APP_SYNC_ON_OPEN', true),
@@ -165,6 +175,9 @@ export function resolveBridgeEngine(rawValue: string | null | undefined): Bridge
   }
   if (normalized === 'claude') {
     return 'claude';
+  }
+  if (normalized === 'opencode') {
+    return 'opencode';
   }
   return 'codex';
 }

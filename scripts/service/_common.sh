@@ -99,6 +99,7 @@ resolve_bridge_engine() {
   case "$raw" in
     gemini) printf 'gemini' ;;
     claude) printf 'claude' ;;
+    opencode) printf 'opencode' ;;
     *) printf 'codex' ;;
   esac
 }
@@ -123,6 +124,7 @@ format_engine_display_name() {
   case "$engine" in
     gemini) printf 'Gemini' ;;
     claude) printf 'Claude' ;;
+    opencode) printf 'OpenCode' ;;
     *) printf 'Codex' ;;
   esac
 }

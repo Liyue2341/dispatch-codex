@@ -8,6 +8,7 @@ import {
   formatApprovalPolicyLabel,
   formatBridgeEngineLabel,
   formatEngineModeLabel,
+  formatModelDisplayName,
   formatSandboxModeLabel,
   formatServiceTierLabel,
 } from './presentation.js';
@@ -24,7 +25,7 @@ interface StatusCommandHost {
   lastError: () => string | null;
   updateStatus: () => void;
   config: {
-    bridgeEngine: 'codex' | 'gemini' | 'claude';
+    bridgeEngine: 'codex' | 'gemini' | 'claude' | 'opencode';
     bridgeInstanceId: string | null;
     codexAppSyncOnOpen: boolean;
     codexAppSyncOnTurnComplete: boolean;
@@ -56,7 +57,7 @@ export class StatusCommandCoordinator {
       t(locale, 'status_last_error', { value: this.host.lastError() ?? t(locale, 'none') }),
       t(locale, 'status_user_agent', { value: this.host.app.getUserAgent() ?? t(locale, 'unknown') }),
       t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
-      t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+      t(locale, 'status_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
       capabilities.reasoningEffort
         ? t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') })
         : null,

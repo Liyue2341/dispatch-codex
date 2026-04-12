@@ -268,6 +268,7 @@ test('plan notifications persist semantic snapshots and stream draft deltas into
       renderRequested: false,
       forceStatusFlush: false,
       forceStreamFlush: false,
+      preferStatusBeforeStream: false,
       renderTask: null,
       queuedInputId: null,
       resolver: () => {},

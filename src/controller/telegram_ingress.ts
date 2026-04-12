@@ -20,7 +20,7 @@ import type { ThreadSessionService } from './thread_session.js';
 import type { StatusCommandCoordinator } from './status_command.js';
 import type { TelegramMessageService } from './telegram_message_service.js';
 import { isThreadNotFoundError } from './utils.js';
-import { formatServiceTierLabel } from './presentation.js';
+import { formatModelDisplayName, formatServiceTierLabel } from './presentation.js';
 
 interface TelegramIngressHost {
   config: AppConfig;
@@ -339,7 +339,7 @@ export class TelegramIngressRouter {
     const lines = [
       t(locale, 'bound_to_thread', { threadId: binding.threadId }),
       t(locale, 'line_title', { value: thread.name || thread.preview || t(locale, 'empty') }),
-      t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+      t(locale, 'status_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
       t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
       t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
       t(locale, 'line_cwd', { value: binding.cwd ?? this.host.config.defaultCwd }),
@@ -359,7 +359,7 @@ export class TelegramIngressRouter {
     await this.host.messages.sendMessage(scopeId, [
       t(locale, 'started_new_thread', { threadId: binding.threadId }),
       t(locale, 'line_cwd', { value: binding.cwd ?? cwd }),
-      t(locale, 'status_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+      t(locale, 'status_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
       t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
       t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
     ].join('\n'));

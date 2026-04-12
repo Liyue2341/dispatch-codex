@@ -99,8 +99,9 @@ function makeBot() {
 
 function makeApp(options: {
   capabilities?: Partial<EngineCapabilities> | null;
+  models?: ModelInfo[];
 } = {}) {
-  const models: ModelInfo[] = [{
+  const models: ModelInfo[] = options.models ?? [{
     id: 'model-gpt-5',
     model: 'gpt-5',
     displayName: 'OpenAI gpt-5',
@@ -165,6 +166,27 @@ test('settings callback updates service tier inside the model settings panel', a
     assert.equal(settings?.serviceTier, 'flex');
     assert.match(bot.edits[0]?.text ?? '', /Service tier: <b>Flex<\/b>/);
     assert.match(bot.answers[0] ?? '', /Service tier: Flex/);
+  });
+});
+
+test('settings callback shows stripped model name for cliproxyapi models', async () => {
+  await withComposition(async (composition, _store, bot) => {
+    await composition.telegramRouter.handleCallback(makeCallback('settings:model:cliproxyapi%2Fgpt-5'));
+
+    assert.match(bot.edits[0]?.text ?? '', /Model: <b>gpt-5<\/b>/);
+    assert.match(bot.answers[0] ?? '', /Model: gpt-5/);
+  }, {
+    app: makeApp({
+      models: [{
+        id: 'model-gpt-5',
+        model: 'cliproxyapi/gpt-5',
+        displayName: 'cliproxyapi/gpt-5',
+        description: 'Reasoning model',
+        isDefault: true,
+        supportedReasoningEfforts: ['medium', 'high'],
+        defaultReasoningEffort: 'medium',
+      }],
+    }),
   });
 });
 

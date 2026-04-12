@@ -33,33 +33,33 @@ test('non-default topic ignores plain text without mention', () => {
   assert.deepEqual(decision, { kind: 'ignore' });
 });
 
-test('non-default topic accepts leading mention and strips it', () => {
+test('default topic accepts leading mention and strips it', () => {
   const decision = resolveTelegramAddressing({
     text: '@bot1 check docker status',
     attachmentsCount: 0,
     entities: mention('@bot1'),
     command: null,
     botUsername: 'bot1',
-    isDefaultTopic: false,
+    isDefaultTopic: true,
     replyToBot: false,
   });
   assert.deepEqual(decision, { kind: 'prompt', text: 'check docker status' });
 });
 
-test('reply to bot continues session outside default topic', () => {
+test('default topic accepts replies to bot messages', () => {
   const decision = resolveTelegramAddressing({
     text: 'continue with nginx too',
     attachmentsCount: 0,
     entities: [],
     command: null,
     botUsername: 'bot1',
-    isDefaultTopic: false,
+    isDefaultTopic: true,
     replyToBot: true,
   });
   assert.deepEqual(decision, { kind: 'prompt', text: 'continue with nginx too' });
 });
 
-test('non-default topic only accepts commands explicitly addressed to the bot', () => {
+test('non-default topic ignores commands explicitly addressed to the bot', () => {
   const command = parseCommand('/status@bot1');
   assert.ok(command);
   const decision = resolveTelegramAddressing({
@@ -71,7 +71,7 @@ test('non-default topic only accepts commands explicitly addressed to the bot', 
     isDefaultTopic: false,
     replyToBot: false,
   });
-  assert.deepEqual(decision, { kind: 'command', command });
+  assert.deepEqual(decision, { kind: 'ignore' });
 });
 
 test('non-default topic ignores bare slash commands', () => {
@@ -85,6 +85,32 @@ test('non-default topic ignores bare slash commands', () => {
     botUsername: 'bot1',
     isDefaultTopic: false,
     replyToBot: false,
+  });
+  assert.deepEqual(decision, { kind: 'ignore' });
+});
+
+test('non-default topic ignores direct mentions', () => {
+  const decision = resolveTelegramAddressing({
+    text: '@bot1 check docker status',
+    attachmentsCount: 0,
+    entities: mention('@bot1'),
+    command: null,
+    botUsername: 'bot1',
+    isDefaultTopic: false,
+    replyToBot: false,
+  });
+  assert.deepEqual(decision, { kind: 'ignore' });
+});
+
+test('non-default topic ignores replies to bot messages', () => {
+  const decision = resolveTelegramAddressing({
+    text: 'continue with nginx too',
+    attachmentsCount: 0,
+    entities: [],
+    command: null,
+    botUsername: 'bot1',
+    isDefaultTopic: false,
+    replyToBot: true,
   });
   assert.deepEqual(decision, { kind: 'ignore' });
 });

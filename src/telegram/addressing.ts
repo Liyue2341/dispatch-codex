@@ -29,6 +29,9 @@ interface DefaultScopeParams {
 }
 
 export function resolveTelegramAddressing(params: ResolveTelegramAddressingParams): TelegramAddressingDecision {
+  if (!params.isDefaultTopic) {
+    return { kind: 'ignore' };
+  }
   const botUsername = normalizeBotUsername(params.botUsername);
   if (params.command) {
     if (isCommandAddressedToThisBot(params.command, botUsername, params.isDefaultTopic)) {

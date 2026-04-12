@@ -17,6 +17,7 @@ import {
   formatCollaborationModeLabel,
   formatEngineModeLabel,
   formatGeminiApprovalModeLabel,
+  formatModelDisplayName,
   formatModeSettingsMessage,
   formatModelSettingsMessage,
   formatServiceTierLabel,
@@ -206,13 +207,16 @@ export class SettingsCoordinator {
     const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
     this.host.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
     const lines = [
-      t(locale, 'model_configured', { model: selected.model }),
+      t(locale, 'model_configured', { model: formatModelDisplayName(selected.model) ?? selected.model }),
       t(locale, 'status_configured_effort', { value: nextEffort.effort ?? t(locale, 'server_default') }),
       t(locale, 'applies_next_turn'),
       t(locale, 'tip_use_models'),
     ];
     if (nextEffort.adjustedFrom) {
-      lines.splice(1, 0, t(locale, 'effort_adjusted_model', { effort: nextEffort.adjustedFrom, model: selected.model }));
+      lines.splice(1, 0, t(locale, 'effort_adjusted_model', {
+        effort: nextEffort.adjustedFrom,
+        model: formatModelDisplayName(selected.model) ?? selected.model,
+      }));
     }
     await this.host.messages.sendMessage(scopeId, lines.join('\n'));
   }
@@ -253,7 +257,7 @@ export class SettingsCoordinator {
       await this.host.messages.sendMessage(
         scopeId,
         t(locale, 'model_does_not_support_effort', {
-          model: currentModel.model,
+          model: formatModelDisplayName(currentModel.model) ?? currentModel.model,
           effort,
           supported: currentModel.supportedReasoningEfforts.join(', '),
         }),
@@ -364,7 +368,9 @@ export class SettingsCoordinator {
       const nextEffort = clampEffortToModel(selected, settings?.reasoningEffort ?? null);
       this.host.store.setChatSettings(scopeId, selected.model, nextEffort.effort);
       await this.refreshModelSettingsPanel(scopeId, event.messageId, locale, models);
-      await this.host.answerCallback(event.callbackQueryId, t(locale, 'callback_model', { model: selected.model }));
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'callback_model', {
+        model: formatModelDisplayName(selected.model) ?? selected.model,
+      }));
       return;
     }
     if (kind === 'tier') {
@@ -494,7 +500,7 @@ export class SettingsCoordinator {
     if (!binding) {
       const text = [
         t(locale, 'where_no_thread_bound'),
-        t(locale, 'where_configured_model', { value: settings?.model ?? t(locale, 'server_default') }),
+        t(locale, 'where_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
         showEffort ? t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }) : null,
         showServiceTier ? t(locale, 'where_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }) : null,
         showMode ? t(locale, 'where_mode', { value: formatEngineModeLabel(locale, this.host.config.bridgeEngine, settings) }) : null,

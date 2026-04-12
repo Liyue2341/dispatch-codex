@@ -86,6 +86,7 @@ test('handleTurnCompleted sends quota guidance instead of a generic completed me
     renderRequested: false,
     forceStatusFlush: false,
     forceStreamFlush: false,
+    preferStatusBeforeStream: false,
     renderTask: null,
     resolver() {},
   });

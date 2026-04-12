@@ -31,6 +31,7 @@ async function main(): Promise<void> {
     const configuredCodexBin = process.env.CODEX_CLI_BIN;
     const configuredGeminiBin = process.env.GEMINI_CLI_BIN;
     const configuredClaudeBin = process.env.CLAUDE_CLI_BIN;
+    const configuredOpenCodeBin = process.env.OPENCODE_CLI_BIN;
     const platform = detectPlatformCapabilities();
     const desktopOpen = getDesktopOpenSupport();
     const checks = [
@@ -40,7 +41,9 @@ async function main(): Promise<void> {
           ? 'codex engine runtime available'
           : configuredEngine === 'gemini'
             ? 'gemini engine runtime available'
-            : 'claude engine runtime available',
+            : configuredEngine === 'claude'
+              ? 'claude engine runtime available'
+              : 'opencode engine runtime available',
         ok: true,
         required: true,
       },
@@ -59,6 +62,11 @@ async function main(): Promise<void> {
         name: 'claude cli available',
         ok: configuredEngine !== 'claude' || hasConfiguredCliBin(configuredClaudeBin) || hasCommand('claude'),
         required: configuredEngine === 'claude',
+      },
+      {
+        name: 'opencode cli available',
+        ok: configuredEngine !== 'opencode' || hasConfiguredCliBin(configuredOpenCodeBin) || hasCommand('opencode'),
+        required: configuredEngine === 'opencode',
       },
       {
         name: 'codex app-server available',
@@ -104,6 +112,7 @@ async function main(): Promise<void> {
       config.tgBotToken,
       config.tgAllowedUserId,
       config.tgAllowedChatId,
+      config.tgAllowedTopicId,
       config.telegramPollIntervalMs,
       store,
       logger,
