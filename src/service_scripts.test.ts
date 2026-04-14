@@ -27,6 +27,19 @@ function runBashScript(rootDir: string, relativePath: string, env: NodeJS.Proces
   });
 }
 
+function isolatedServiceScriptEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    BRIDGE_ENGINE: undefined,
+    BRIDGE_INSTANCE_ID: undefined,
+    BRIDGE_HOME: undefined,
+    APP_HOME: undefined,
+    SERVICE_LABEL: undefined,
+    SYSTEMD_UNIT_NAME: undefined,
+    ...overrides,
+  };
+}
+
 const shellServiceTest = process.platform === 'win32' ? test.skip : test;
 
 shellServiceTest('linux service scripts manage the systemd user lifecycle through the unified entrypoints', () => {
@@ -73,15 +86,14 @@ fi
 exit 0
 `);
 
-  const env = {
-    ...process.env,
+  const env = isolatedServiceScriptEnv({
     HOME: toShellPath(fakeHome),
     XDG_CONFIG_HOME: toShellPath(fakeConfigHome),
     PATH: joinPathEnv(toShellPath(fakeBin), process.env.PATH),
     FOLLOW: 'false',
     LINES: '5',
     ENV_FILE: toShellPath(envFile),
-  };
+  });
 
   try {
     const install = runBashScript(rootDir, 'scripts/service/install.sh', env);
@@ -170,13 +182,12 @@ fi
 exit 0
 `);
 
-  const env = {
-    ...process.env,
+  const env = isolatedServiceScriptEnv({
     HOME: toShellPath(fakeHome),
     XDG_CONFIG_HOME: toShellPath(fakeConfigHome),
     PATH: joinPathEnv(toShellPath(fakeBin), process.env.PATH),
     ENV_FILE: toShellPath(envFile),
-  };
+  });
 
   try {
     const install = runBashScript(rootDir, 'scripts/service/install.sh', env);
@@ -218,11 +229,13 @@ shellServiceTest('macOS restart script uses kickstart instead of bootout/bootstr
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-launchd-restart-test-'));
   const fakeHome = path.join(tempDir, 'home');
   const fakeBin = path.join(tempDir, 'bin');
+  const envFile = path.join(tempDir, '.env');
   const launchctlLog = path.join(tempDir, 'launchctl.log');
 
   fs.mkdirSync(fakeHome, { recursive: true });
   fs.mkdirSync(fakeBin, { recursive: true });
   fs.mkdirSync(path.join(fakeHome, 'Library', 'LaunchAgents'), { recursive: true });
+  fs.writeFileSync(envFile, '', 'utf8');
   fs.writeFileSync(
     path.join(fakeHome, 'Library', 'LaunchAgents', 'com.ganxing.telegram-codex-app-bridge.plist'),
     '<plist version="1.0"></plist>\n',
@@ -246,11 +259,11 @@ shellServiceTest('macOS restart script uses kickstart instead of bootout/bootstr
     '',
   ].join('\n'));
 
-  const result = runBashScript(rootDir, 'scripts/service/restart.sh', {
-    ...process.env,
+  const result = runBashScript(rootDir, 'scripts/service/restart.sh', isolatedServiceScriptEnv({
     HOME: toShellPath(fakeHome),
     PATH: joinPathEnv(toShellPath(fakeBin), process.env.PATH),
-  });
+    ENV_FILE: toShellPath(envFile),
+  }));
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const launchctlCalls = fs.readFileSync(launchctlLog, 'utf8');
@@ -345,8 +358,7 @@ exit 0
     '',
   ].join('\n'));
 
-  const result = runBashScript(rootDir, 'scripts/service/restart-safe.sh', {
-    ...process.env,
+  const result = runBashScript(rootDir, 'scripts/service/restart-safe.sh', isolatedServiceScriptEnv({
     HOME: toShellPath(fakeHome),
     XDG_CONFIG_HOME: toShellPath(fakeConfigHome),
     PATH: joinPathEnv(toShellPath(fakeBin), process.env.PATH),
@@ -356,7 +368,7 @@ exit 0
     RESTART_TIMEOUT_SEC: '5',
     RESTART_POLL_SEC: '1',
     DETACH: 'false',
-  });
+  }));
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /\[bridge\] 重启已开始/);
@@ -483,8 +495,7 @@ exit 0
     '',
   ].join('\n'));
 
-  const result = runBashScript(rootDir, 'scripts/service/restart-safe.sh', {
-    ...process.env,
+  const result = runBashScript(rootDir, 'scripts/service/restart-safe.sh', isolatedServiceScriptEnv({
     HOME: toShellPath(fakeHome),
     XDG_CONFIG_HOME: toShellPath(fakeConfigHome),
     PATH: joinPathEnv(toShellPath(fakeBin), process.env.PATH),
@@ -494,7 +505,7 @@ exit 0
     RESTART_TIMEOUT_SEC: '5',
     RESTART_POLL_SEC: '1',
     SAFE_RESTART_CGROUP_FILE: toShellPath(fakeCgroupFile),
-  });
+  }));
 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /\[bridge\] restart started/);
