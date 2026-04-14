@@ -1,6 +1,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AppConfig } from '../config.js';
+import {
+  resolveCodexProfileReasoningEffortSupport,
+  resolveCodexProfileServiceTierSupport,
+  resolveCodexProviderProfile,
+} from '../codex_profiles.js';
 import { resolveEngineCapabilities, type EngineProvider, type TurnInput } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
@@ -58,6 +63,20 @@ export class ThreadSessionService {
     return resolveEngineCapabilities(this.host.app.capabilities);
   }
 
+  private supportsReasoningEffort(scopeId: string): boolean {
+    return resolveCodexProfileReasoningEffortSupport(
+      resolveCodexProviderProfile(this.host.config, this.host.store.getActiveProviderProfile(scopeId)),
+      this.capabilities.reasoningEffort,
+    );
+  }
+
+  private supportsServiceTier(scopeId: string): boolean {
+    return resolveCodexProfileServiceTierSupport(
+      resolveCodexProviderProfile(this.host.config, this.host.store.getActiveProviderProfile(scopeId)),
+      this.capabilities.serviceTier,
+    );
+  }
+
   async createBinding(scopeId: string, requestedCwd: string | null): Promise<ThreadBinding> {
     const cwd = requestedCwd || this.host.config.defaultCwd;
     const settings = this.host.store.getChatSettings(scopeId);
@@ -67,7 +86,8 @@ export class ThreadSessionService {
       approvalPolicy: access.approvalPolicy,
       sandboxMode: access.sandboxMode,
       model: settings?.model ?? null,
-      serviceTier: this.capabilities.serviceTier ? (settings?.serviceTier ?? null) : null,
+      serviceTier: this.supportsServiceTier(scopeId) ? (settings?.serviceTier ?? null) : null,
+      scopeId,
     });
     return this.storeThreadSession(scopeId, session, 'seed');
   }
@@ -96,6 +116,7 @@ export class ThreadSessionService {
         collaborationMode: turnConfig.collaborationMode,
         geminiApprovalMode: turnConfig.geminiApprovalMode,
         developerInstructions: options.developerInstructions ?? null,
+        scopeId,
       });
       const resolvedThreadId = turn.threadId ?? binding.threadId;
       if (resolvedThreadId !== binding.threadId) {
@@ -130,6 +151,7 @@ export class ThreadSessionService {
         collaborationMode: nextTurnConfig.collaborationMode,
         geminiApprovalMode: nextTurnConfig.geminiApprovalMode,
         developerInstructions: options.developerInstructions ?? null,
+        scopeId,
       });
       const resolvedThreadId = turn.threadId ?? replacement.threadId;
       if (resolvedThreadId !== replacement.threadId) {
@@ -206,7 +228,7 @@ export class ThreadSessionService {
       return binding;
     }
     try {
-      const session = await this.host.app.resumeThread({ threadId: binding.threadId });
+      const session = await this.host.app.resumeThread({ threadId: binding.threadId, scopeId });
       return this.storeThreadSession(scopeId, session, 'seed');
     } catch (error) {
       if (!isThreadNotFoundError(error)) {
@@ -233,7 +255,7 @@ export class ThreadSessionService {
     reason: 'open' | 'reveal' | 'turn-complete',
   ): Promise<string | null> {
     try {
-      await this.host.app.revealThread(threadId);
+      await this.host.app.revealThread(threadId, scopeId);
       this.host.store.insertAudit('outbound', scopeId, 'codex.app.reveal', `${reason}:${threadId}`);
       return null;
     } catch (error) {
@@ -242,7 +264,7 @@ export class ThreadSessionService {
   }
 
   async bindCachedThread(scopeId: string, threadId: string): Promise<ThreadBinding> {
-    const session = await this.host.app.resumeThread({ threadId });
+    const session = await this.host.app.resumeThread({ threadId, scopeId });
     return this.storeThreadSession(scopeId, session, 'replace');
   }
 
@@ -251,7 +273,7 @@ export class ThreadSessionService {
     if (existing?.threadId === threadId) {
       return this.ensureThreadReady(scopeId, existing);
     }
-    const thread = await this.host.app.readThread(threadId, false);
+    const thread = await this.host.app.readThread(threadId, false, scopeId);
     if (!thread) {
       throw new Error(`Thread ${threadId} is unavailable`);
     }
@@ -344,11 +366,10 @@ export class ThreadSessionService {
     geminiApprovalMode: GeminiApprovalModeValue | null;
   }> {
     let model = settings?.model ?? null;
-    const capabilities = this.capabilities;
-    const serviceTier = capabilities.serviceTier ? (settings?.serviceTier ?? null) : null;
-    const effort = capabilities.reasoningEffort ? (settings?.reasoningEffort ?? null) : null;
+    const serviceTier = this.supportsServiceTier(scopeId) ? (settings?.serviceTier ?? null) : null;
+    const effort = this.supportsReasoningEffort(scopeId) ? (settings?.reasoningEffort ?? null) : null;
     const modelVariant = settings?.modelVariant ?? null;
-    const collaborationMode = capabilities.guidedPlan === 'none'
+    const collaborationMode = this.capabilities.guidedPlan === 'none'
       ? null
       : collaborationModeOverride === undefined
       ? settings?.collaborationMode ?? null
@@ -359,7 +380,7 @@ export class ThreadSessionService {
         ? settings?.geminiApprovalMode ?? null
         : geminiApprovalModeOverride;
     if (collaborationMode === 'plan' && !model) {
-      const models = await this.host.app.listModels();
+      const models = await this.host.app.listModels(scopeId);
       model = resolveCurrentModel(models, null)?.model ?? null;
     }
     return { model, serviceTier, effort, modelVariant, collaborationMode, geminiApprovalMode };

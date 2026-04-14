@@ -34,6 +34,7 @@ import type {
 import { getDesktopOpenSupport } from '../platform/capabilities.js';
 import { spawnCommand } from '../process/spawn_command.js';
 import { buildThreadDeepLink, openUrl } from './deeplink.js';
+import { sanitizeAssistantText } from '../assistant_text.js';
 
 export type {
   EngineNotification as JsonRpcNotification,
@@ -68,12 +69,14 @@ export class CodexAppClient extends EventEmitter {
   private requestId = 0;
   private pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: unknown) => void }>();
   private desiredRunning = false;
+  private startPromise: Promise<void> | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private port: number | null = null;
   private connected = false;
   private userAgent: string | null = null;
   private accountIdentity: AccountIdentitySnapshot | null = null;
   private accountRateLimits: AccountRateLimitSnapshot | null = null;
+  private ignoredRateLimitReadErrorLogged = false;
 
   constructor(
     private readonly codexCliBin: string,
@@ -81,6 +84,8 @@ export class CodexAppClient extends EventEmitter {
     private readonly autolaunch: boolean,
     private readonly logger: Logger,
     private readonly platform: NodeJS.Platform = process.platform,
+    private readonly modelCatalogOverlay: ModelInfo[] = [],
+    private readonly modelCatalogMode: 'merge' | 'overlay-only' = 'merge',
   ) {
     super();
   }
@@ -108,8 +113,20 @@ export class CodexAppClient extends EventEmitter {
 
   async start(): Promise<void> {
     this.desiredRunning = true;
-    if (this.connected) return;
-    await this.startServer();
+    if (this.connected) {
+      return;
+    }
+    if (this.startPromise) {
+      await this.startPromise;
+      return;
+    }
+    const startTask = this.startServer().finally(() => {
+      if (this.startPromise === startTask) {
+        this.startPromise = null;
+      }
+    });
+    this.startPromise = startTask;
+    await startTask;
   }
 
   async stop(): Promise<void> {
@@ -235,7 +252,10 @@ export class CodexAppClient extends EventEmitter {
       models.push(...rows.map(mapModel));
       cursor = typeof (result as any).nextCursor === 'string' ? (result as any).nextCursor : null;
     } while (cursor);
-    return models;
+    if (this.modelCatalogMode === 'overlay-only' && this.modelCatalogOverlay.length > 0) {
+      return this.modelCatalogOverlay;
+    }
+    return mergeModelCatalog(models, this.modelCatalogOverlay);
   }
 
   async interruptTurn(threadId: string, turnId: string): Promise<void> {
@@ -267,6 +287,16 @@ export class CodexAppClient extends EventEmitter {
   }
 
   private async startServer(): Promise<void> {
+    if (this.child && this.child.exitCode === null) {
+      this.logger.warn('codex.app-server.stale_child_replaced');
+      this.child.kill('SIGTERM');
+      this.child = null;
+    }
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.close();
+    }
+    this.socket = null;
+    this.connected = false;
     if (this.autolaunch && this.launchCommand.trim()) {
       const launcher = spawn(this.launchCommand, { shell: true, detached: true, stdio: 'ignore' });
       launcher.unref();
@@ -350,6 +380,16 @@ export class CodexAppClient extends EventEmitter {
       this.logger.warn('codex.account_identity_read_failed', { error: String(error) });
     });
     void this.readAccountRateLimits().catch((error) => {
+      if (shouldIgnoreAccountRateLimitReadError(error)) {
+        if (!this.ignoredRateLimitReadErrorLogged) {
+          this.ignoredRateLimitReadErrorLogged = true;
+          this.logger.info('codex.account_rate_limits_unavailable', {
+            reason: 'unsupported_plan_type',
+            error: String(error),
+          });
+        }
+        return;
+      }
       this.logger.warn('codex.account_rate_limits_read_failed', { error: String(error) });
     });
   }
@@ -432,7 +472,7 @@ export class CodexAppClient extends EventEmitter {
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       try {
-        await this.startServer();
+        await this.start();
       } catch (error) {
         this.logger.error('codex.reconnect_failed', { error: String(error) });
         this.scheduleReconnect();
@@ -526,7 +566,7 @@ function mapThread(raw: any): AppThread {
   return {
     threadId: String(raw.id),
     name: raw.name ? String(raw.name) : null,
-    preview: String(raw.preview || '(empty)'),
+    preview: sanitizeAssistantText(String(raw.preview || '(empty)')) ?? '(empty)',
     cwd: raw.cwd ? String(raw.cwd) : null,
     modelProvider: raw.modelProvider ? String(raw.modelProvider) : null,
     status: mapThreadStatus(raw.status),
@@ -595,6 +635,32 @@ function mapModel(raw: any): ModelInfo {
   };
 }
 
+export function mergeModelCatalog(baseModels: ModelInfo[], overlayModels: ModelInfo[]): ModelInfo[] {
+  if (overlayModels.length === 0) {
+    return baseModels;
+  }
+  const overlayKeys = new Set(overlayModels.map((model) => model.model));
+  const hasOverlayDefault = overlayModels.some((model) => model.isDefault);
+  const merged: ModelInfo[] = overlayModels.map((overlay) => {
+    const base = baseModels.find((model) => model.model === overlay.model) ?? null;
+    return {
+      ...(base ?? {}),
+      ...overlay,
+      isDefault: overlay.isDefault || (!hasOverlayDefault && Boolean(base?.isDefault)),
+    };
+  });
+  for (const base of baseModels) {
+    if (overlayKeys.has(base.model)) {
+      continue;
+    }
+    merged.push({
+      ...base,
+      isDefault: hasOverlayDefault ? false : base.isDefault,
+    });
+  }
+  return merged;
+}
+
 function mapSandboxPolicy(mode: SandboxModeValue): { type: 'readOnly' | 'workspaceWrite' | 'dangerFullAccess' } {
   if (mode === 'read-only') {
     return { type: 'readOnly' };
@@ -622,9 +688,9 @@ function extractStructuredText(value: any): string | null {
     ?? extractTextCandidate(value?.message)
     ?? extractTextCandidate(value?.value);
   if (directText !== null) {
-    return directText;
+    return sanitizeAssistantText(directText);
   }
-  return extractTextCandidate(value);
+  return sanitizeAssistantText(extractTextCandidate(value));
 }
 
 function extractStructuredString(value: any): string | null {
@@ -712,4 +778,9 @@ function mapCreditsSnapshot(raw: any): CreditsSnapshot | null {
     unlimited: Boolean(raw.unlimited),
     balance: raw.balance === null || raw.balance === undefined ? null : String(raw.balance),
   };
+}
+
+function shouldIgnoreAccountRateLimitReadError(error: unknown): boolean {
+  return error instanceof Error
+    && /unknown variant `prolite`/i.test(error.message);
 }

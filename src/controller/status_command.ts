@@ -4,11 +4,17 @@ import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
 import type { AccountIdentitySnapshot, AccountRateLimitSnapshot, AppLocale } from '../types.js';
 import {
+  resolveCodexProfileReasoningEffortSupport,
+  resolveCodexProfileServiceTierSupport,
+  resolveCodexProviderProfile,
+} from '../codex_profiles.js';
+import {
   formatAccessPresetLabel,
   formatApprovalPolicyLabel,
   formatBridgeEngineLabel,
   formatEngineModeLabel,
   formatModelDisplayName,
+  formatProviderProfileLabel,
   formatSandboxModeLabel,
   formatServiceTierLabel,
 } from './presentation.js';
@@ -27,6 +33,17 @@ interface StatusCommandHost {
   config: {
     bridgeEngine: 'codex' | 'gemini' | 'claude' | 'opencode';
     bridgeInstanceId: string | null;
+    codexDefaultProviderProfileId: string;
+    codexProviderProfiles: Array<{
+      id: string;
+      displayName: string;
+      providerLabel?: string | null;
+      backendBaseUrl?: string | null;
+      capabilities?: {
+        reasoningEffort?: boolean;
+        serviceTier?: boolean;
+      } | null;
+    }>;
     codexAppSyncOnOpen: boolean;
     codexAppSyncOnTurnComplete: boolean;
   };
@@ -43,13 +60,25 @@ export class StatusCommandCoordinator {
     const binding = this.host.store.getBinding(scopeId);
     const settings = this.host.store.getChatSettings(scopeId);
     const access = this.host.resolveEffectiveAccess(scopeId);
+    const activeProfile = this.resolveActiveCodexProfile(scopeId);
     const accountIdentity = await this.readStatusAccountIdentity();
     const rateLimits = await this.readStatusRateLimits();
     const capabilities = this.capabilities;
+    const showReasoningEffort = resolveCodexProfileReasoningEffortSupport(activeProfile, capabilities.reasoningEffort);
+    const showServiceTier = resolveCodexProfileServiceTierSupport(activeProfile, capabilities.serviceTier);
     this.host.updateStatus();
     const lines = [
       t(locale, 'status_engine', { value: formatBridgeEngineLabel(locale, this.host.config.bridgeEngine) }),
       t(locale, 'status_instance', { value: this.host.config.bridgeInstanceId ?? t(locale, 'none') }),
+      this.host.config.bridgeEngine === 'codex' && activeProfile
+        ? t(locale, 'status_active_profile', { value: formatProviderProfileLabel(activeProfile) })
+        : null,
+      this.host.config.bridgeEngine === 'codex' && activeProfile?.providerLabel
+        ? t(locale, 'status_effective_provider', { value: activeProfile.providerLabel })
+        : null,
+      this.host.config.bridgeEngine === 'codex' && activeProfile?.backendBaseUrl
+        ? t(locale, 'status_backend_base_url', { value: activeProfile.backendBaseUrl })
+        : null,
       t(locale, 'status_connected', { value: t(locale, this.host.app.isConnected() ? 'yes' : 'no') }),
       accountIdentity
         ? t(locale, 'status_account_identity', { value: formatAccountIdentityLabel(accountIdentity) })
@@ -58,13 +87,13 @@ export class StatusCommandCoordinator {
       t(locale, 'status_user_agent', { value: this.host.app.getUserAgent() ?? t(locale, 'unknown') }),
       t(locale, 'status_current_thread', { value: binding?.threadId ?? t(locale, 'none') }),
       t(locale, 'status_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
-      capabilities.reasoningEffort
+      showReasoningEffort
         ? t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') })
         : null,
       settings?.modelVariant
         ? t(locale, 'status_configured_variant', { value: settings.modelVariant })
         : null,
-      capabilities.serviceTier
+      showServiceTier
         ? t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) })
         : null,
       (this.host.config.bridgeEngine === 'gemini' || capabilities.guidedPlan !== 'none')
@@ -106,6 +135,10 @@ export class StatusCommandCoordinator {
       t(locale, 'status_active_turns', { value: this.host.activeTurnCount() }),
     ].filter((line): line is string => Boolean(line));
     await this.host.messages.sendMessage(scopeId, lines.join('\n'));
+  }
+
+  private resolveActiveCodexProfile(scopeId: string) {
+    return resolveCodexProviderProfile(this.host.config, this.host.store.getActiveProviderProfile(scopeId));
   }
 
   private async readStatusRateLimits(): Promise<AccountRateLimitSnapshot | null> {

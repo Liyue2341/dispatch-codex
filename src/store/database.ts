@@ -50,11 +50,11 @@ export class BridgeStore {
   private readonly queue: QueueStateRepository;
   private readonly previews: PreviewStateRepository;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: { defaultProviderProfileId?: string } = {}) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = openSqliteDatabase(dbPath);
     initializeBridgeStoreSchema(this.db);
-    this.chatState = new ChatStateRepository(this.db);
+    this.chatState = new ChatStateRepository(this.db, options.defaultProviderProfileId ?? 'openai-native');
     this.attachments = new AttachmentStateRepository(this.db);
     this.workflow = new WorkflowStateRepository(this.db);
     this.plans = new PlanStateRepository(this.db);
@@ -68,6 +68,14 @@ export class BridgeStore {
 
   setTelegramOffset(botKey: string, updateId: number): void {
     this.chatState.setTelegramOffset(botKey, updateId);
+  }
+
+  getActiveProviderProfile(scopeId: string): string {
+    return this.chatState.getActiveProviderProfile(scopeId);
+  }
+
+  setActiveProviderProfile(scopeId: string, providerProfileId: string): void {
+    this.chatState.setActiveProviderProfile(scopeId, providerProfileId);
   }
 
   getBinding(chatId: string): ThreadBinding | null {

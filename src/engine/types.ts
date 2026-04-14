@@ -26,6 +26,7 @@ export interface EngineServerRequest {
 export interface ListThreadsOptions {
   limit: number;
   searchTerm?: string | null;
+  scopeId?: string | null;
 }
 
 export interface StartThreadOptions {
@@ -34,10 +35,12 @@ export interface StartThreadOptions {
   sandboxMode: SandboxModeValue;
   model: string | null;
   serviceTier: ServiceTierValue | null;
+  scopeId?: string | null;
 }
 
 export interface ResumeThreadOptions {
   threadId: string;
+  scopeId?: string | null;
 }
 
 export interface TextTurnInput {
@@ -66,12 +69,14 @@ export interface StartTurnOptions {
   collaborationMode: CollaborationModeValue | null;
   geminiApprovalMode?: GeminiApprovalModeValue | null;
   developerInstructions: string | null;
+  scopeId?: string | null;
 }
 
 export interface SteerTurnOptions {
   threadId: string;
   turnId: string;
   input: TurnInput[];
+  scopeId?: string | null;
 }
 
 export interface TurnStartResult {
@@ -136,19 +141,19 @@ export interface EngineProvider {
   readAccountRateLimits?(): Promise<AccountRateLimitSnapshot | null>;
 
   listThreads(options: ListThreadsOptions): Promise<AppThread[]>;
-  readThread(threadId: string, includeTurns?: boolean): Promise<AppThread | null>;
-  readThreadWithTurns(threadId: string): Promise<AppThreadWithTurns | null>;
-  renameThread(threadId: string, name: string): Promise<void>;
+  readThread(threadId: string, includeTurns?: boolean, scopeId?: string | null): Promise<AppThread | null>;
+  readThreadWithTurns(threadId: string, scopeId?: string | null): Promise<AppThreadWithTurns | null>;
+  renameThread(threadId: string, name: string, scopeId?: string | null): Promise<void>;
 
   startThread(options: StartThreadOptions): Promise<ThreadSessionState>;
   resumeThread(options: ResumeThreadOptions): Promise<ThreadSessionState>;
-  revealThread(threadId: string): Promise<void>;
+  revealThread(threadId: string, scopeId?: string | null): Promise<void>;
 
   startTurn(options: StartTurnOptions): Promise<TurnStartResult>;
   steerTurn(options: SteerTurnOptions): Promise<TurnSteerResult>;
-  interruptTurn(threadId: string, turnId: string): Promise<void>;
-  respond(requestId: string | number, result: unknown): Promise<void>;
-  respondError(requestId: string | number, message: string): Promise<void>;
+  interruptTurn(threadId: string, turnId: string, scopeId?: string | null): Promise<void>;
+  respond(requestId: string | number, result: unknown, scopeId?: string | null): Promise<void>;
+  respondError(requestId: string | number, message: string, scopeId?: string | null): Promise<void>;
 
-  listModels(): Promise<ModelInfo[]>;
+  listModels(scopeId?: string | null): Promise<ModelInfo[]>;
 }

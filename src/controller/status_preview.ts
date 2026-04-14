@@ -4,7 +4,7 @@ import type { BridgeStore } from '../store/database.js';
 import type { AppLocale } from '../types.js';
 import type { ActiveTurn, ArchivedStatusContent } from './turn_state.js';
 import { formatTurnCompletionText, resolveTurnCompletion } from './turn_completion.js';
-import { TelegramMessageService, type InlineKeyboard, isTelegramMessageGone } from './telegram_message_service.js';
+import { TelegramMessageService, type InlineKeyboard, isTelegramMessageGone, parseTelegramRetryAfterMs } from './telegram_message_service.js';
 
 interface StatusPreviewHost {
   logger: Logger;
@@ -131,7 +131,7 @@ export class StatusPreviewCoordinator {
         });
       } catch (error) {
         this.host.logger.warn('telegram.preview_send_failed', { error: String(error), turnId: active.turnId });
-        this.host.scheduleRenderRetry(active);
+        this.host.scheduleRenderRetry(active, parseTelegramRetryAfterMs(error) ?? undefined);
       }
       return;
     }
@@ -160,7 +160,7 @@ export class StatusPreviewCoordinator {
         turnId: active.turnId,
         messageId: active.previewMessageId,
       });
-      this.host.scheduleRenderRetry(active);
+      this.host.scheduleRenderRetry(active, parseTelegramRetryAfterMs(error) ?? undefined);
     }
   }
 
@@ -189,7 +189,7 @@ export class StatusPreviewCoordinator {
         }
       } catch (error) {
         this.host.logger.warn('telegram.preview_archive_send_failed', { error: String(error), turnId: active.turnId });
-        this.host.scheduleRenderRetry(active);
+        this.host.scheduleRenderRetry(active, parseTelegramRetryAfterMs(error) ?? undefined);
         return false;
       }
       return true;
@@ -214,7 +214,7 @@ export class StatusPreviewCoordinator {
         turnId: active.turnId,
         messageId: active.previewMessageId,
       });
-      this.host.scheduleRenderRetry(active);
+      this.host.scheduleRenderRetry(active, parseTelegramRetryAfterMs(error) ?? undefined);
       return false;
     }
 

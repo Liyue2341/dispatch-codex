@@ -268,7 +268,11 @@ export class PendingUserInputCoordinator {
     answers: Record<string, string[]>,
     locale: AppLocale,
   ): Promise<void> {
-    await this.host.app.respond(record.serverRequestId, { answers: buildPendingUserInputResponse(answers) });
+    await this.host.app.respond(
+      record.serverRequestId,
+      { answers: buildPendingUserInputResponse(answers) },
+      record.chatId,
+    );
     this.host.store.markPendingUserInputResolved(record.localId);
     await this.host.clearPendingUserInputStatus(record.threadId, record.localId);
     if (record.messageId !== null) {
@@ -287,7 +291,7 @@ export class PendingUserInputCoordinator {
   }
 
   private async cancelPendingUserInput(record: PendingUserInputRecord, locale: AppLocale): Promise<void> {
-    await this.host.app.respondError(record.serverRequestId, 'User cancelled the requested input');
+    await this.host.app.respondError(record.serverRequestId, 'User cancelled the requested input', record.chatId);
     this.host.store.markPendingUserInputResolved(record.localId);
     await this.host.clearPendingUserInputStatus(record.threadId, record.localId);
     if (record.messageId !== null) {

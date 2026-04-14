@@ -75,6 +75,9 @@ export class ClaudeCliClient extends EventEmitter {
     if (options.permissionMode) {
       args.push('--permission-mode', options.permissionMode);
     }
+    if (options.permissionMode === 'bypassPermissions') {
+      args.push('--dangerously-skip-permissions');
+    }
     if (options.allowedTools.length > 0) {
       args.push('--allowedTools', options.allowedTools.join(','));
     }

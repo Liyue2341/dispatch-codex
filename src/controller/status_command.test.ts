@@ -35,7 +35,7 @@ function withComposition(run: (
 }
 
 function makeConfig(tempDir: string, overrides: Partial<AppConfig> = {}): AppConfig {
-  return {
+  const baseConfig: AppConfig = {
     envFile: path.join(tempDir, '.env'),
     bridgeEngine: 'codex',
     bridgeInstanceId: null,
@@ -45,6 +45,15 @@ function makeConfig(tempDir: string, overrides: Partial<AppConfig> = {}): AppCon
     tgAllowedChatId: null,
     tgAllowedTopicId: null,
     codexCliBin: 'codex',
+    codexProviderProfiles: [{
+      id: 'openai-native',
+      displayName: 'OpenAI Codex',
+      cliBin: 'codex',
+      modelCatalogPath: null,
+      modelCatalog: [],
+      defaultModel: null,
+    }],
+    codexDefaultProviderProfileId: 'openai-native',
     geminiCliBin: 'gemini',
     geminiDefaultModel: 'gemini-3-pro-preview',
     geminiModelAllowlist: ['gemini-3-pro-preview'],
@@ -65,7 +74,12 @@ function makeConfig(tempDir: string, overrides: Partial<AppConfig> = {}): AppCon
     statusPath: path.join(tempDir, 'status.json'),
     logPath: path.join(tempDir, 'bridge.log'),
     lockPath: path.join(tempDir, 'bridge.lock'),
+  };
+  return {
+    ...baseConfig,
     ...overrides,
+    codexProviderProfiles: overrides.codexProviderProfiles ?? baseConfig.codexProviderProfiles,
+    codexDefaultProviderProfileId: overrides.codexDefaultProviderProfileId ?? baseConfig.codexDefaultProviderProfileId,
   };
 }
 
@@ -228,5 +242,52 @@ test('/status strips cliproxyapi prefix from configured model display', async ()
     const text = bot.messages[0]?.text ?? '';
     assert.match(text, /已配置模型：gpt-5/);
     assert.doesNotMatch(text, /cliproxyapi\/gpt-5/);
+  });
+});
+
+test('/status hides service tier for MiniMax Codex provider profiles that do not support it', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setActiveProviderProfile('chat-1', 'cliproxyminimax');
+    store.setChatSettings('chat-1', 'MiniMax-M2.7', 'high', 'zh');
+    store.setChatServiceTier('chat-1', 'fast');
+
+    await composition.telegramRouter.handleCommand(makeTextEvent('/status'), 'zh', 'status', []);
+
+    const text = bot.messages[0]?.text ?? '';
+    assert.match(text, /当前 profile：CLIProxyAPI MiniMax/);
+    assert.match(text, /已配置推理强度：high/);
+    assert.doesNotMatch(text, /已配置服务档位：/);
+  }, {
+    config: {
+      codexProviderProfiles: [
+        {
+          id: 'openai-native',
+          displayName: 'OpenAI Codex',
+          cliBin: 'codex',
+          modelCatalogPath: null,
+          modelCatalog: [],
+          defaultModel: null,
+          capabilities: {
+            reasoningEffort: true,
+            serviceTier: true,
+          },
+        },
+        {
+          id: 'cliproxyminimax',
+          displayName: 'CLIProxyAPI MiniMax',
+          cliBin: 'codex-via-cliproxy.sh',
+          modelCatalogPath: '/tmp/catalog.json',
+          modelCatalog: [],
+          defaultModel: 'MiniMax-M2.7',
+          providerLabel: 'cliproxyminimax',
+          backendBaseUrl: 'http://127.0.0.1:8320/api/provider/minimax-codex/v1',
+          capabilities: {
+            reasoningEffort: true,
+            serviceTier: false,
+          },
+        },
+      ],
+      codexDefaultProviderProfileId: 'openai-native',
+    },
   });
 });

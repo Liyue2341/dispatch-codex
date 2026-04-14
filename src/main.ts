@@ -107,7 +107,9 @@ async function main(): Promise<void> {
   const processLock = acquireProcessLock(config.lockPath);
   let store: BridgeStore | null = null;
   try {
-    store = new BridgeStore(config.storePath);
+    store = new BridgeStore(config.storePath, {
+      defaultProviderProfileId: config.codexDefaultProviderProfileId,
+    });
     const bot = new TelegramGateway(
       config.tgBotToken,
       config.tgAllowedUserId,
@@ -119,7 +121,10 @@ async function main(): Promise<void> {
       config.bridgeEngine,
       (config.platform?.restartMode ?? 'service') !== 'none',
     );
-    const app = createEngineProvider(config, logger);
+    const scopedStore = store;
+    const app = createEngineProvider(config, logger, (scopeId?: string | null) => (
+      scopeId ? scopedStore.getActiveProviderProfile(scopeId) : config.codexDefaultProviderProfileId
+    ));
     const controller = new BridgeController(config, store, logger, bot, app);
 
     process.on('unhandledRejection', (error) => {

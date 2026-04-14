@@ -144,7 +144,7 @@ export function isTelegramMessageGone(error: unknown): boolean {
     || message.includes('message not found');
 }
 
-function parseTelegramRetryAfterMs(error: unknown): number | null {
+export function parseTelegramRetryAfterMs(error: unknown): number | null {
   const message = formatUserError(error).toLowerCase();
   const match = message.match(/retry after\s+(\d+)/i);
   if (!match?.[1]) {

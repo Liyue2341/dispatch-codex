@@ -7,11 +7,24 @@ export function initializeBridgeStoreSchema(db: SqliteDatabase): void {
       bot_key TEXT PRIMARY KEY,
       update_id INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS scope_provider_profiles (
+      scope_id TEXT PRIMARY KEY,
+      provider_profile_id TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS chat_bindings (
       chat_id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,
       cwd TEXT,
       updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS workspace_chat_bindings (
+      scope_id TEXT NOT NULL,
+      provider_profile_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      cwd TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (scope_id, provider_profile_id)
     );
     CREATE TABLE IF NOT EXISTS chat_settings (
       chat_id TEXT PRIMARY KEY,
@@ -28,6 +41,23 @@ export function initializeBridgeStoreSchema(db: SqliteDatabase): void {
       persist_plan_history INTEGER NOT NULL DEFAULT 1,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS workspace_chat_settings (
+      scope_id TEXT NOT NULL,
+      provider_profile_id TEXT NOT NULL,
+      model TEXT,
+      reasoning_effort TEXT,
+      model_variant TEXT,
+      service_tier TEXT,
+      locale TEXT,
+      access_preset TEXT,
+      collaboration_mode TEXT,
+      gemini_approval_mode TEXT,
+      confirm_plan_before_execute INTEGER NOT NULL DEFAULT 1,
+      auto_queue_messages INTEGER NOT NULL DEFAULT 1,
+      persist_plan_history INTEGER NOT NULL DEFAULT 1,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (scope_id, provider_profile_id)
+    );
     CREATE TABLE IF NOT EXISTS thread_cache (
       chat_id TEXT NOT NULL,
       idx INTEGER NOT NULL,
@@ -40,12 +70,33 @@ export function initializeBridgeStoreSchema(db: SqliteDatabase): void {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (chat_id, idx)
     );
+    CREATE TABLE IF NOT EXISTS workspace_thread_cache (
+      scope_id TEXT NOT NULL,
+      provider_profile_id TEXT NOT NULL,
+      idx INTEGER NOT NULL,
+      thread_id TEXT NOT NULL,
+      name TEXT,
+      preview TEXT NOT NULL,
+      cwd TEXT,
+      model_provider TEXT,
+      status TEXT NOT NULL DEFAULT 'idle',
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (scope_id, provider_profile_id, idx)
+    );
     CREATE TABLE IF NOT EXISTS thread_name_overrides (
       chat_id TEXT NOT NULL,
       thread_id TEXT NOT NULL,
       custom_name TEXT NOT NULL,
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (chat_id, thread_id)
+    );
+    CREATE TABLE IF NOT EXISTS workspace_thread_name_overrides (
+      scope_id TEXT NOT NULL,
+      provider_profile_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      custom_name TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (scope_id, provider_profile_id, thread_id)
     );
     CREATE TABLE IF NOT EXISTS pending_approvals (
       local_id TEXT PRIMARY KEY,

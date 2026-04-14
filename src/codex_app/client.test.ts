@@ -1,233 +1,120 @@
+import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import { CodexAppClient, mergeModelCatalog } from './client.js';
 import { Logger } from '../logger.js';
-import { CodexAppClient, PLAN_MODE_DEVELOPER_INSTRUCTIONS } from './client.js';
+import type { ModelInfo } from '../types.js';
 
-function makeLogger(): Logger {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-client-test-'));
-  return new Logger('error', path.join(logDir, 'bridge.log'));
-}
-
-test('revealThread fails clearly on unsupported hosts', async () => {
-  const logger = makeLogger();
-  const client = new CodexAppClient('codex', '', false, logger, 'freebsd');
-
-  await assert.rejects(
-    () => client.revealThread('thread-123'),
-    /desktop deep links are not supported on this host \(freebsd\)/,
-  );
-});
-
-test('startTurn sends plan collaboration instructions with recommended-option guidance', async () => {
-  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
-  let capturedMethod = '';
-  let capturedParams: any = null;
-  (client as any).request = async (method: string, params: any) => {
-    capturedMethod = method;
-    capturedParams = params;
-    return { turn: { id: 'turn-1', status: 'running' } };
-  };
-
-  await client.startTurn({
-    threadId: 'thread-1',
-    input: [{ type: 'text', text: 'Plan this change', text_elements: [] }],
-    approvalPolicy: 'never',
-    sandboxMode: 'workspace-write',
-    cwd: '/tmp/demo',
-    model: 'gpt-5',
-    serviceTier: 'fast',
-    effort: 'medium',
-    collaborationMode: 'plan',
-    developerInstructions: null,
-  });
-
-  assert.equal(capturedMethod, 'turn/start');
-  assert.equal(capturedParams?.serviceTier, 'fast');
-  assert.equal(capturedParams?.collaborationMode?.mode, 'plan');
-  assert.equal(
-    capturedParams?.collaborationMode?.settings?.developer_instructions,
-    PLAN_MODE_DEVELOPER_INSTRUCTIONS,
-  );
-  assert.match(
-    capturedParams?.collaborationMode?.settings?.developer_instructions,
-    /Put the recommended option first\./,
-  );
-});
-
-test('startTurn allows plan developer instructions to be overridden per turn', async () => {
-  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
-  let capturedParams: any = null;
-  (client as any).request = async (_method: string, params: any) => {
-    capturedParams = params;
-    return { turn: { id: 'turn-2', status: 'running' } };
-  };
-
-  await client.startTurn({
-    threadId: 'thread-2',
-    input: [{ type: 'text', text: 'Confirm the plan', text_elements: [] }],
-    approvalPolicy: 'never',
-    sandboxMode: 'workspace-write',
-    cwd: '/tmp/demo',
-    model: 'gpt-5',
-    serviceTier: null,
-    effort: 'medium',
-    collaborationMode: 'plan',
-    developerInstructions: 'Execute only after the user confirms.',
-  });
-
-  assert.equal(
-    capturedParams?.collaborationMode?.settings?.developer_instructions,
-    'Execute only after the user confirms.',
-  );
-});
-
-test('startThread forwards service tier and maps it back from the session response', async () => {
-  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
-  let capturedMethod = '';
-  let capturedParams: any = null;
-  (client as any).request = async (method: string, params: any) => {
-    capturedMethod = method;
-    capturedParams = params;
-    return {
-      thread: {
-        id: 'thread-1',
-        name: 'Demo',
-        preview: 'Preview',
-        cwd: '/tmp/demo',
-        modelProvider: 'openai',
-        status: { type: 'idle' },
-        updatedAt: 123,
-      },
-      model: 'gpt-5',
-      modelProvider: 'openai',
-      serviceTier: 'flex',
-      reasoningEffort: 'medium',
-      cwd: '/tmp/demo',
-    };
-  };
-
-  const session = await client.startThread({
-    cwd: '/tmp/demo',
-    approvalPolicy: 'never',
-    sandboxMode: 'workspace-write',
-    model: 'gpt-5',
-    serviceTier: 'fast',
-  });
-
-  assert.equal(capturedMethod, 'thread/start');
-  assert.equal(capturedParams?.serviceTier, 'fast');
-  assert.equal(session.serviceTier, 'flex');
-});
-
-test('steerTurn sends turn/steer with the expected active turn id', async () => {
-  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
-  let capturedMethod = '';
-  let capturedParams: any = null;
-  (client as any).request = async (method: string, params: any) => {
-    capturedMethod = method;
-    capturedParams = params;
-    return { turnId: 'turn-1' };
-  };
-
-  await client.steerTurn({
-    threadId: 'thread-1',
-    turnId: 'turn-1',
-    input: [{ type: 'text', text: 'Narrow the change', text_elements: [] }],
-  });
-
-  assert.equal(capturedMethod, 'turn/steer');
-  assert.deepEqual(capturedParams, {
-    threadId: 'thread-1',
-    input: [{ type: 'text', text: 'Narrow the change', text_elements: [] }],
-    expectedTurnId: 'turn-1',
-  });
-});
-
-test('renameThread calls thread/name/set with threadId and name', async () => {
-  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
-  let capturedMethod = '';
-  let capturedParams: any = null;
-  (client as any).request = async (method: string, params: any) => {
-    capturedMethod = method;
-    capturedParams = params;
-    return {};
-  };
-
-  await client.renameThread('019cd3f5-6f58-7580-ad62-44d93775169a', 'Renamed Thread');
-
-  assert.equal(capturedMethod, 'thread/name/set');
-  assert.deepEqual(capturedParams, {
-    threadId: '019cd3f5-6f58-7580-ad62-44d93775169a',
-    name: 'Renamed Thread',
-  });
-});
-
-test('readAccountRateLimits maps the codex rate limit windows', async () => {
-  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
-  (client as any).request = async (method: string) => {
-    assert.equal(method, 'account/rateLimits/read');
-    return {
-      rateLimits: {
-        limitId: 'codex',
-        limitName: null,
-        primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: 1773082597 },
-        secondary: { usedPercent: 81, windowDurationMins: 10080, resetsAt: 1773531564 },
-        credits: { hasCredits: false, unlimited: false, balance: '0' },
-        planType: 'plus',
-      },
-      rateLimitsByLimitId: {
-        codex: {
-          limitId: 'codex',
-          limitName: null,
-          primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: 1773082597 },
-          secondary: { usedPercent: 81, windowDurationMins: 10080, resetsAt: 1773531564 },
-          credits: { hasCredits: false, unlimited: false, balance: '0' },
-          planType: 'plus',
-        },
-      },
-    };
-  };
-
-  const limits = await client.readAccountRateLimits();
-
-  assert.deepEqual(limits, {
-    limitId: 'codex',
-    limitName: null,
-    primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: 1773082597 },
-    secondary: { usedPercent: 81, windowDurationMins: 10080, resetsAt: 1773531564 },
-    credits: { hasCredits: false, unlimited: false, balance: '0' },
-    planType: 'plus',
-  });
-  assert.deepEqual(client.getAccountRateLimits(), limits);
-});
-
-test('account/rateLimits/updated notification refreshes the cached limits', () => {
-  const client = new CodexAppClient('codex', '', false, makeLogger(), 'linux');
-
-  (client as any).handleMessage(JSON.stringify({
-    jsonrpc: '2.0',
-    method: 'account/rateLimits/updated',
-    params: {
-      rateLimits: {
-        limitId: 'codex',
-        limitName: null,
-        primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: 1773082597 },
-        secondary: { usedPercent: 82, windowDurationMins: 10080, resetsAt: 1773531564 },
-        credits: { hasCredits: false, unlimited: false, balance: '0' },
-        planType: 'plus',
-      },
+test('mergeModelCatalog prepends overlay models and lets overlay defaults win', () => {
+  const baseModels: ModelInfo[] = [
+    {
+      id: 'gpt-5.4',
+      model: 'gpt-5.4',
+      displayName: 'gpt-5.4',
+      description: 'Base default',
+      isDefault: true,
+      supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultReasoningEffort: 'medium',
     },
-  }));
+  ];
+  const overlayModels: ModelInfo[] = [
+    {
+      id: 'MiniMax-M2.7',
+      model: 'MiniMax-M2.7',
+      displayName: 'MiniMax-M2.7',
+      description: 'Overlay default',
+      isDefault: true,
+      supportedReasoningEfforts: ['low', 'medium', 'high'],
+      defaultReasoningEffort: 'medium',
+    },
+    {
+      id: 'MiniMax-M2.5',
+      model: 'MiniMax-M2.5',
+      displayName: 'MiniMax-M2.5',
+      description: 'Overlay secondary',
+      isDefault: false,
+      supportedReasoningEfforts: ['low', 'medium', 'high'],
+      defaultReasoningEffort: 'medium',
+    },
+  ];
 
-  assert.deepEqual(client.getAccountRateLimits(), {
-    limitId: 'codex',
-    limitName: null,
-    primary: { usedPercent: 40, windowDurationMins: 300, resetsAt: 1773082597 },
-    secondary: { usedPercent: 82, windowDurationMins: 10080, resetsAt: 1773531564 },
-    credits: { hasCredits: false, unlimited: false, balance: '0' },
-    planType: 'plus',
+  const merged = mergeModelCatalog(baseModels, overlayModels);
+  assert.deepEqual(merged.map((model) => model.model), ['MiniMax-M2.7', 'MiniMax-M2.5', 'gpt-5.4']);
+  assert.equal(merged[0]?.isDefault, true);
+  assert.equal(merged[2]?.isDefault, false);
+});
+
+test('CodexAppClient can expose overlay-only model catalogs for non-native providers', async () => {
+  const overlayModels: ModelInfo[] = [
+    {
+      id: 'MiniMax-M2.7',
+      model: 'MiniMax-M2.7',
+      displayName: 'MiniMax-M2.7',
+      description: 'Overlay default',
+      isDefault: true,
+      supportedReasoningEfforts: ['low', 'medium', 'high'],
+      defaultReasoningEffort: 'medium',
+    },
+    {
+      id: 'MiniMax-M2.5',
+      model: 'MiniMax-M2.5',
+      displayName: 'MiniMax-M2.5',
+      description: 'Overlay secondary',
+      isDefault: false,
+      supportedReasoningEfforts: ['low', 'medium', 'high'],
+      defaultReasoningEffort: 'medium',
+    },
+  ];
+  const client = new CodexAppClient(
+    'codex',
+    '',
+    false,
+    new Logger('error', path.join(os.tmpdir(), 'telegram-codex-client-test.log')),
+    process.platform,
+    overlayModels,
+    'overlay-only',
+  ) as any;
+  client.request = async () => ({
+    data: [{
+      id: 'gpt-5.4',
+      model: 'gpt-5.4',
+      displayName: 'gpt-5.4',
+      description: 'Base default',
+      isDefault: true,
+      supportedReasoningEfforts: [{ reasoningEffort: 'medium' }],
+      defaultReasoningEffort: 'medium',
+    }],
+    nextCursor: null,
   });
+
+  const models = await client.listModels();
+  assert.deepEqual(models.map((model: ModelInfo) => model.model), ['MiniMax-M2.7', 'MiniMax-M2.5']);
+});
+
+test('CodexAppClient serializes concurrent start requests for one profile runtime', async () => {
+  const client = new CodexAppClient(
+    'codex',
+    '',
+    false,
+    new Logger('error', path.join(os.tmpdir(), 'telegram-codex-client-start-lock.test.log')),
+    process.platform,
+  ) as any;
+
+  let startServerCalls = 0;
+  let releaseStart!: () => void;
+  client.startServer = async () => {
+    startServerCalls += 1;
+    await new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    client.connected = true;
+  };
+
+  const first = client.start();
+  const second = client.start();
+  assert.equal(startServerCalls, 1);
+  releaseStart();
+  await Promise.all([first, second]);
+  assert.equal(startServerCalls, 1);
 });

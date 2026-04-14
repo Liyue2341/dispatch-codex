@@ -358,6 +358,8 @@ export function createBridgeComposition(
     config: {
       bridgeEngine: config.bridgeEngine,
       bridgeInstanceId: config.bridgeInstanceId,
+      codexDefaultProviderProfileId: config.codexDefaultProviderProfileId,
+      codexProviderProfiles: config.codexProviderProfiles,
       codexAppSyncOnOpen: config.codexAppSyncOnOpen,
       codexAppSyncOnTurnComplete: config.codexAppSyncOnTurnComplete,
     },
@@ -421,6 +423,7 @@ export function createBridgeComposition(
     approvalsAndInputs,
     guidedPlans: refs.guidedPlans,
     turnExecution: refs.turnExecution,
+    turnLifecycle,
     settings: refs.settings,
     sessions,
     messages,

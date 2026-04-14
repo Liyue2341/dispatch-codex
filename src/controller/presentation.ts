@@ -30,6 +30,13 @@ interface ThreadLike {
   updatedAt: number;
 }
 
+interface ProviderProfileLike {
+  id: string;
+  displayName: string;
+  providerLabel?: string | null;
+  backendBaseUrl?: string | null;
+}
+
 export type ThreadHistoryPreviewStatus = 'complete' | 'partial' | 'failed' | 'interrupted';
 
 export interface ThreadListPresentationState {
@@ -158,6 +165,7 @@ export function formatWhereMessage(
     showServiceTier?: boolean;
     showMode?: boolean;
     showAccess?: boolean;
+    activeProfileLabel?: string | null;
   } = {},
 ): string {
   const showEffort = options.showEffort ?? true;
@@ -165,6 +173,7 @@ export function formatWhereMessage(
   const showMode = options.showMode ?? true;
   const showAccess = options.showAccess ?? true;
   return [
+    options.activeProfileLabel ? t(locale, 'where_active_profile', { value: options.activeProfileLabel }) : null,
     t(locale, 'where_thread', { value: thread.threadId }),
     t(locale, 'where_title', { value: thread.name || t(locale, 'untitled') }),
     t(locale, 'where_preview', { value: thread.preview || t(locale, 'empty') }),
@@ -200,6 +209,7 @@ export function formatSettingsHomeMessage(
     scopeId: string;
     engine: BridgeEngineValue;
     instanceId: string | null;
+    activeProfileLabel?: string | null;
     threadId: string | null;
     cwd: string | null;
     settings: ChatSessionSettings | null;
@@ -226,6 +236,9 @@ export function formatSettingsHomeMessage(
     '',
     t(locale, 'status_engine', { value: escapeTelegramHtml(formatBridgeEngineLabel(locale, state.engine)) }),
     t(locale, 'status_instance', { value: escapeTelegramHtml(state.instanceId ?? t(locale, 'none')) }),
+    state.activeProfileLabel
+      ? t(locale, 'settings_active_profile', { value: escapeTelegramHtml(state.activeProfileLabel) })
+      : null,
     t(locale, 'line_scope', { value: escapeTelegramHtml(formatTelegramScopeLabel(locale, state.scopeId)) }),
     t(locale, 'settings_current_thread', { value: escapeTelegramHtml(state.threadId ?? t(locale, 'none')) }),
     t(locale, 'line_cwd', { value: escapeTelegramHtml(state.cwd ?? t(locale, 'no_cwd')) }),
@@ -473,11 +486,13 @@ export function buildSettingsHomeKeyboard(
   locale: AppLocale,
   settings: ChatSessionSettings | null,
   options: {
+    showProvider?: boolean;
     showMode?: boolean;
     showAccess?: boolean;
     showPlanControls?: boolean;
   } = {},
 ): InlineButton[][] {
+  const showProvider = options.showProvider ?? false;
   const showMode = options.showMode ?? true;
   const showAccess = options.showAccess ?? true;
   const showPlanControls = options.showPlanControls ?? true;
@@ -486,6 +501,7 @@ export function buildSettingsHomeKeyboard(
   const historyOn = settings?.persistPlanHistory ?? true;
   const navButtons: InlineButton[] = [
     { text: t(locale, 'button_models'), callback_data: 'nav:models' },
+    ...(showProvider ? [{ text: t(locale, 'button_provider'), callback_data: 'nav:provider' }] : []),
     ...(showMode ? [{ text: t(locale, 'button_mode'), callback_data: 'nav:mode' }] : []),
     ...(showAccess ? [{ text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' }] : []),
   ];
@@ -504,6 +520,52 @@ export function buildSettingsHomeKeyboard(
       callback_data: `settings:history:${historyOn ? 'off' : 'on'}`,
     }]] : []),
   ];
+}
+
+export function formatProviderSettingsMessage(
+  locale: AppLocale,
+  scopeId: string,
+  activeProfile: ProviderProfileLike,
+  currentThreadId: string | null,
+): string {
+  return [
+    t(locale, 'provider_title'),
+    t(locale, 'provider_tap_to_change'),
+    '',
+    t(locale, 'line_scope', { value: escapeTelegramHtml(formatTelegramScopeLabel(locale, scopeId)) }),
+    t(locale, 'provider_current', { value: escapeTelegramHtml(formatProviderProfileLabel(activeProfile)) }),
+    activeProfile.providerLabel
+      ? t(locale, 'status_effective_provider', { value: escapeTelegramHtml(activeProfile.providerLabel) })
+      : null,
+    activeProfile.backendBaseUrl
+      ? t(locale, 'provider_backend', { value: escapeTelegramHtml(activeProfile.backendBaseUrl) })
+      : null,
+    t(locale, 'provider_current_thread', { value: escapeTelegramHtml(currentThreadId ?? t(locale, 'none')) }),
+    '',
+    t(locale, 'provider_scope_isolated'),
+  ].filter(Boolean).join('\n');
+}
+
+export function buildProviderSettingsKeyboard(
+  locale: AppLocale,
+  profiles: ProviderProfileLike[],
+  activeProfileId: string,
+): InlineButton[][] {
+  const profileButtons: InlineButton[] = profiles.map((profile) => ({
+    text: `${profile.id === activeProfileId ? '• ' : ''}${truncate(profile.displayName, 18)}`,
+    callback_data: `settings:provider:${encodeURIComponent(profile.id)}`,
+  }));
+  return [
+    ...chunkButtons(profileButtons, 2),
+    [{
+      text: t(locale, 'button_settings_home'),
+      callback_data: 'settings:home',
+    }],
+  ];
+}
+
+export function formatProviderProfileLabel(profile: ProviderProfileLike): string {
+  return profile.displayName === profile.id ? profile.id : `${profile.displayName} (${profile.id})`;
 }
 
 export function resolveRequestedModel(models: ModelInfo[], requested: string): ModelInfo | null {

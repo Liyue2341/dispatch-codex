@@ -12,6 +12,7 @@ import { ensureTurnSegment } from './turn_rendering.js';
 import type { TurnLifecycleCoordinator } from './turn_lifecycle.js';
 import type { TelegramMessageService } from './telegram_message_service.js';
 import type { StatusPreviewCoordinator } from './status_preview.js';
+import { sanitizeAssistantText } from '../assistant_text.js';
 import { formatUserError } from './utils.js';
 
 interface TurnExecutionHost {
@@ -100,7 +101,12 @@ export class TurnExecutionCoordinator {
     threadId: string,
     turnId: string,
     previewMessageId: number,
-    options: { guidedPlanSessionId?: string | null; guidedPlanDraftOnly?: boolean; queuedInputId?: string | null } = {},
+    options: {
+      guidedPlanSessionId?: string | null;
+      guidedPlanDraftOnly?: boolean;
+      queuedInputId?: string | null;
+      profileId?: string | null;
+    } = {},
   ): void {
     void this.host.turnLifecycle.registerTurn(
       scopeId,
@@ -110,7 +116,10 @@ export class TurnExecutionCoordinator {
       threadId,
       turnId,
       previewMessageId,
-      options,
+      {
+        ...options,
+        profileId: options.profileId ?? this.host.store.getActiveProviderProfile(scopeId),
+      },
     ).catch((error) => {
       void this.host.handleAsyncError(options.queuedInputId ? 'queue.start' : 'telegram.turn_start', error, scopeId);
     });
@@ -131,17 +140,20 @@ export class TurnExecutionCoordinator {
       }
       case 'agent_message_delta': {
         const segment = ensureTurnSegment(active, activity.itemId, undefined, activity.outputKind);
-        segment.text += activity.delta;
-        active.buffer += activity.delta;
+        segment.rawText += activity.delta;
+        segment.text = sanitizeAssistantText(segment.rawText) ?? '';
+        active.buffer = collectVisibleFinalOutput(active);
         await this.host.turnRendering.queueRender(active);
         return;
       }
       case 'agent_message_completed': {
         const segment = ensureTurnSegment(active, activity.itemId, activity.phase, activity.outputKind);
         if (activity.text !== null) {
-          segment.text = activity.text || segment.text;
+          segment.rawText = activity.text;
+          segment.text = sanitizeAssistantText(activity.text) ?? '';
+          active.buffer = collectVisibleFinalOutput(active);
           if (activity.outputKind === 'final_answer') {
-            active.finalText = activity.text || active.buffer || t(this.host.localeForChat(active.scopeId), 'completed');
+            active.finalText = segment.text || active.buffer || t(this.host.localeForChat(active.scopeId), 'completed');
           }
         }
         segment.completed = true;
@@ -192,7 +204,7 @@ export class TurnExecutionCoordinator {
       return false;
     }
     active.guidedPlanExecutionBlocked = true;
-    await this.host.app.respond(serverRequestId, { decision: 'decline' });
+    await this.host.app.respond(serverRequestId, { decision: 'decline' }, active.scopeId);
     await this.host.messages.sendMessage(active.scopeId, t(this.host.localeForChat(active.scopeId), 'plan_draft_execution_blocked'));
     if (!active.interruptRequested) {
       try {
@@ -285,11 +297,18 @@ export class TurnExecutionCoordinator {
   private async requestInterrupt(active: ActiveTurn): Promise<void> {
     active.interruptRequested = true;
     try {
-      await this.host.app.interruptTurn(active.threadId, active.turnId);
+      await this.host.app.interruptTurn(active.threadId, active.turnId, active.scopeId);
       await this.host.turnRendering.queueRender(active, { forceStatus: true, forceStream: true });
     } catch (error) {
       active.interruptRequested = false;
       throw error;
     }
   }
+}
+
+function collectVisibleFinalOutput(active: { segments: Array<{ outputKind: string; text: string }> }): string {
+  return active.segments
+    .filter((segment) => segment.outputKind === 'final_answer')
+    .map((segment) => segment.text)
+    .join('');
 }

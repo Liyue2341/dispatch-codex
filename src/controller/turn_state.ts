@@ -12,6 +12,7 @@ export interface ActiveTurnSegment {
   itemId: string;
   phase: string | null;
   outputKind: TurnOutputKind;
+  rawText: string;
   text: string;
   completed: boolean;
   messages: RenderedTelegramMessage[];
@@ -39,6 +40,7 @@ export interface ArchivedStatusContent {
 
 export interface ActiveTurn {
   scopeId: string;
+  profileId?: string | null;
   chatId: string;
   topicId: number | null;
   renderRoute: TelegramRenderRoute;

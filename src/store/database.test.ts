@@ -35,6 +35,28 @@ test('BridgeStore persists and resolves thread bindings', () => {
   });
 });
 
+test('BridgeStore isolates bindings and settings per active provider profile', () => {
+  withStore((store) => {
+    store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
+    store.setBinding('chat-1', 'thread-openai', '/repo/openai');
+
+    store.setActiveProviderProfile('chat-1', 'cliproxyminimax');
+    assert.equal(store.getBinding('chat-1'), null);
+    assert.equal(store.getChatSettings('chat-1'), null);
+
+    store.setChatSettings('chat-1', 'MiniMax-M2.7', 'high', 'en');
+    store.setBinding('chat-1', 'thread-minimax', '/repo/minimax');
+
+    assert.equal(store.getBinding('chat-1')?.threadId, 'thread-minimax');
+    assert.equal(store.getChatSettings('chat-1')?.model, 'MiniMax-M2.7');
+
+    store.setActiveProviderProfile('chat-1', 'openai-native');
+    assert.equal(store.getBinding('chat-1')?.threadId, 'thread-openai');
+    assert.equal(store.getChatSettings('chat-1')?.model, 'gpt-5');
+    assert.equal(store.getChatSettings('chat-1')?.reasoningEffort, 'medium');
+  });
+});
+
 test('BridgeStore caches thread lists and pending approvals', () => {
   withStore((store) => {
     store.cacheThreadList('chat-2', [

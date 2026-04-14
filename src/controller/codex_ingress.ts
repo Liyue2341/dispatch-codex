@@ -7,6 +7,7 @@ import type { ApprovalInputCoordinator } from './approval_input.js';
 import type { GuidedPlanCoordinator } from './guided_plan.js';
 import type { SettingsCoordinator } from './settings.js';
 import type { TurnExecutionCoordinator } from './turn_execution.js';
+import type { TurnLifecycleCoordinator } from './turn_lifecycle.js';
 import type { ThreadSessionService } from './thread_session.js';
 import type { TelegramMessageService } from './telegram_message_service.js';
 import type { AppLocale } from '../types.js';
@@ -20,6 +21,7 @@ interface CodexIngressHost {
   approvalsAndInputs: ApprovalInputCoordinator;
   guidedPlans: GuidedPlanCoordinator;
   turnExecution: TurnExecutionCoordinator;
+  turnLifecycle: Pick<TurnLifecycleCoordinator, 'abandonTurnsByProfile'>;
   settings: SettingsCoordinator;
   sessions: ThreadSessionService;
   messages: TelegramMessageService;
@@ -38,6 +40,19 @@ export class CodexIngressRouter {
       return;
     }
     switch (notification.method) {
+      case 'bridge/profile_disconnected': {
+        const profileId = typeof notification.params?.profileId === 'string'
+          ? notification.params.profileId.trim()
+          : '';
+        if (!profileId) {
+          return;
+        }
+        const abandoned = await this.host.turnLifecycle.abandonTurnsByProfile(profileId);
+        if (abandoned > 0) {
+          this.host.logger.warn('codex.profile_turns_abandoned', { profileId, count: abandoned });
+        }
+        return;
+      }
       case 'sessionConfigured': {
         const params = notification.params as any;
         const threadId = String(params.session_id || '');
@@ -124,6 +139,7 @@ export class CodexIngressRouter {
           await this.host.app.respondError(
             request.id,
             'Interactive requestUserInput is only available in plan mode for this chat.',
+            scopeId,
           );
           await this.host.messages.sendMessage(scopeId, t(locale, 'input_plan_mode_only'));
           return;

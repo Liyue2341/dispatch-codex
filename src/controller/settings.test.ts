@@ -36,7 +36,7 @@ function withComposition(run: (
 }
 
 function makeConfig(tempDir: string, overrides: Partial<AppConfig> = {}): AppConfig {
-  return {
+  const baseConfig: AppConfig = {
     envFile: path.join(tempDir, '.env'),
     bridgeEngine: 'codex',
     bridgeInstanceId: null,
@@ -46,6 +46,15 @@ function makeConfig(tempDir: string, overrides: Partial<AppConfig> = {}): AppCon
     tgAllowedChatId: null,
     tgAllowedTopicId: null,
     codexCliBin: 'codex',
+    codexProviderProfiles: [{
+      id: 'openai-native',
+      displayName: 'OpenAI Codex',
+      cliBin: 'codex',
+      modelCatalogPath: null,
+      modelCatalog: [],
+      defaultModel: null,
+    }],
+    codexDefaultProviderProfileId: 'openai-native',
     geminiCliBin: 'gemini',
     geminiDefaultModel: 'gemini-3-pro-preview',
     geminiModelAllowlist: ['gemini-3-pro-preview'],
@@ -66,7 +75,12 @@ function makeConfig(tempDir: string, overrides: Partial<AppConfig> = {}): AppCon
     statusPath: path.join(tempDir, 'status.json'),
     logPath: path.join(tempDir, 'bridge.log'),
     lockPath: path.join(tempDir, 'bridge.lock'),
+  };
+  return {
+    ...baseConfig,
     ...overrides,
+    codexProviderProfiles: overrides.codexProviderProfiles ?? baseConfig.codexProviderProfiles,
+    codexDefaultProviderProfileId: overrides.codexDefaultProviderProfileId ?? baseConfig.codexDefaultProviderProfileId,
   };
 }
 
@@ -294,6 +308,50 @@ test('service tier changes are blocked while a turn is active', async () => {
   });
 });
 
+test('service tier controls are disabled for the MiniMax Codex provider profile', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setActiveProviderProfile('chat-1', 'cliproxyminimax');
+    store.setChatSettings('chat-1', 'MiniMax-M2.7', 'high', 'en');
+
+    await composition.telegramRouter.handleCommand({ scopeId: 'chat-1' } as any, 'en', 'fast', []);
+    await composition.telegramRouter.handleCallback(makeCallback('settings:tier:flex'));
+
+    assert.equal(store.getChatSettings('chat-1')?.serviceTier, null);
+    assert.match(bot.messages.at(-1) ?? '', /does not support \/fast/);
+    assert.match(bot.answers.at(-1) ?? '', /Unsupported action/);
+  }, {
+    config: {
+      codexProviderProfiles: [
+        {
+          id: 'openai-native',
+          displayName: 'OpenAI Codex',
+          cliBin: 'codex',
+          modelCatalogPath: null,
+          modelCatalog: [],
+          defaultModel: null,
+          capabilities: {
+            reasoningEffort: true,
+            serviceTier: true,
+          },
+        },
+        {
+          id: 'cliproxyminimax',
+          displayName: 'CLIProxyAPI MiniMax',
+          cliBin: 'codex-via-cliproxy.sh',
+          modelCatalogPath: '/tmp/catalog.json',
+          modelCatalog: [],
+          defaultModel: 'MiniMax-M2.7',
+          capabilities: {
+            reasoningEffort: true,
+            serviceTier: false,
+          },
+        },
+      ],
+      codexDefaultProviderProfileId: 'openai-native',
+    },
+  });
+});
+
 test('gemini /mode accepts yolo and persists it as the next approval mode', async () => {
   await withComposition(async (composition, store, bot) => {
     store.setChatSettings('chat-1', 'gemini-2.5-pro', 'medium', 'en');
@@ -321,5 +379,91 @@ test('gemini /mode accepts yolo and persists it as the next approval mode', asyn
         reconnect: false,
       },
     }),
+  });
+});
+
+test('/provider switches the active codex profile and preserves locale in the new workspace', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.setChatSettings('chat-1', 'gpt-5', 'medium', 'en');
+    store.setBinding('chat-1', 'thread-openai', '/tmp/demo');
+
+    await composition.telegramRouter.handleCommand({ scopeId: 'chat-1' } as any, 'en', 'provider', ['cliproxyminimax']);
+
+    assert.equal(store.getActiveProviderProfile('chat-1'), 'cliproxyminimax');
+    assert.equal(store.getBinding('chat-1'), null);
+    assert.equal(store.getChatSettings('chat-1')?.locale, 'en');
+    assert.match(bot.messages.at(-1) ?? '', /Switched provider profile to: CLIProxyAPI MiniMax \(cliproxyminimax\)/);
+    assert.match(bot.messages.at(-1) ?? '', /next message will start a new thread/i);
+  }, {
+    config: {
+      codexProviderProfiles: [
+        {
+          id: 'openai-native',
+          displayName: 'OpenAI Codex',
+          cliBin: 'codex',
+          modelCatalogPath: null,
+          modelCatalog: [],
+          defaultModel: null,
+          providerLabel: 'openai',
+        },
+        {
+          id: 'cliproxyminimax',
+          displayName: 'CLIProxyAPI MiniMax',
+          cliBin: 'codex-via-cliproxy.sh',
+          modelCatalogPath: '/tmp/catalog.json',
+          modelCatalog: [],
+          defaultModel: 'MiniMax-M2.7',
+          providerLabel: 'cliproxyminimax',
+          backendBaseUrl: 'http://127.0.0.1:8320/api/provider/minimax-codex/v1',
+          modelCatalogMode: 'overlay-only',
+        },
+      ],
+      codexDefaultProviderProfileId: 'openai-native',
+    },
+  });
+});
+
+test('/provider refuses to switch while the current scope still has queued work', async () => {
+  await withComposition(async (composition, store, bot) => {
+    store.saveQueuedTurnInput({
+      queueId: 'queue-1',
+      scopeId: 'chat-1',
+      chatId: 'chat-1',
+      threadId: 'thread-openai',
+      input: [{ type: 'text', text: 'follow up' }],
+      sourceSummary: 'follow up',
+      telegramMessageId: 10,
+      status: 'queued',
+      createdAt: 1,
+      updatedAt: 1,
+    });
+
+    await composition.telegramRouter.handleCommand({ scopeId: 'chat-1' } as any, 'en', 'provider', ['cliproxyminimax']);
+
+    assert.equal(store.getActiveProviderProfile('chat-1'), 'openai-native');
+    assert.match(bot.messages.at(-1) ?? '', /Finish pending work in this chat before switching provider/);
+    assert.match(bot.messages.at(-1) ?? '', /Queued messages are still waiting/);
+  }, {
+    config: {
+      codexProviderProfiles: [
+        {
+          id: 'openai-native',
+          displayName: 'OpenAI Codex',
+          cliBin: 'codex',
+          modelCatalogPath: null,
+          modelCatalog: [],
+          defaultModel: null,
+        },
+        {
+          id: 'cliproxyminimax',
+          displayName: 'CLIProxyAPI MiniMax',
+          cliBin: 'codex-via-cliproxy.sh',
+          modelCatalogPath: '/tmp/catalog.json',
+          modelCatalog: [],
+          defaultModel: 'MiniMax-M2.7',
+        },
+      ],
+      codexDefaultProviderProfileId: 'openai-native',
+    },
   });
 });

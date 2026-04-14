@@ -3,6 +3,11 @@ import { isDefaultTelegramScope, resolveTelegramAddressing } from '../telegram/a
 import type { TelegramCallbackEvent, TelegramTextEvent } from '../telegram/gateway.js';
 import { getTelegramCommands, t } from '../i18n.js';
 import type { AppConfig } from '../config.js';
+import {
+  resolveCodexProfileReasoningEffortSupport,
+  resolveCodexProfileServiceTierSupport,
+  resolveCodexProviderProfile,
+} from '../codex_profiles.js';
 import { resolveEngineCapabilities, type EngineCapabilities } from '../engine/types.js';
 import type { BridgeStore } from '../store/database.js';
 import type { AppLocale, ThreadBinding } from '../types.js';
@@ -62,6 +67,7 @@ export class TelegramIngressRouter {
       threads: (event, locale, args) => this.host.threadPanels.showThreadsPanel(event.scopeId, undefined, args.join(' ').trim() || null, locale),
       open: (event, locale, args) => this.handleOpenCommand(event.scopeId, locale, args),
       new: (event, locale, args) => this.handleNewCommand(event.scopeId, locale, args),
+      provider: (event, locale, args) => this.host.settings.handleProviderCommand(event, locale, args),
       model: (event, locale, args) => this.host.settings.handleModelCommand(event, locale, args),
       models: (event, locale) => this.host.settings.showModelSettingsPanel(event.scopeId, undefined, locale),
       tier: (event, locale, args) => this.host.settings.handleTierCommand(event, locale, args),
@@ -107,10 +113,18 @@ export class TelegramIngressRouter {
         ),
       },
       {
-        pattern: /^nav:(models|mode|threads|reveal|permissions)$/,
+        pattern: /^nav:(models|provider|mode|threads|reveal|permissions)$/,
         handle: (event, match, locale) => this.host.settings.handleNavigationCallback(
           event,
-          match[1]! as 'models' | 'mode' | 'threads' | 'reveal' | 'permissions',
+          match[1]! as 'models' | 'provider' | 'mode' | 'threads' | 'reveal' | 'permissions',
+          locale,
+        ),
+      },
+      {
+        pattern: /^settings:provider:(.+)$/,
+        handle: (event, match, locale) => this.host.settings.handleProviderSettingsCallback(
+          event,
+          match[1]!,
           locale,
         ),
       },
@@ -336,12 +350,17 @@ export class TelegramIngressRouter {
       throw error;
     }
     const settings = this.host.store.getChatSettings(scopeId);
+    const capabilities = this.resolveEffectiveCapabilities(scopeId);
     const lines = [
       t(locale, 'bound_to_thread', { threadId: binding.threadId }),
       t(locale, 'line_title', { value: thread.name || thread.preview || t(locale, 'empty') }),
       t(locale, 'status_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
-      t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
-      t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
+      ...(capabilities.reasoningEffort
+        ? [t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') })]
+        : []),
+      ...(capabilities.serviceTier
+        ? [t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) })]
+        : []),
       t(locale, 'line_cwd', { value: binding.cwd ?? this.host.config.defaultCwd }),
     ];
     if (this.host.config.codexAppSyncOnOpen) {
@@ -356,12 +375,17 @@ export class TelegramIngressRouter {
     const cwd = args.join(' ').trim() || this.host.config.defaultCwd;
     const binding = await this.host.sessions.createBinding(scopeId, cwd);
     const settings = this.host.store.getChatSettings(scopeId);
+    const capabilities = this.resolveEffectiveCapabilities(scopeId);
     await this.host.messages.sendMessage(scopeId, [
       t(locale, 'started_new_thread', { threadId: binding.threadId }),
       t(locale, 'line_cwd', { value: binding.cwd ?? cwd }),
       t(locale, 'status_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
-      t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }),
-      t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) }),
+      ...(capabilities.reasoningEffort
+        ? [t(locale, 'status_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') })]
+        : []),
+      ...(capabilities.serviceTier
+        ? [t(locale, 'status_configured_service_tier', { value: formatServiceTierLabel(locale, settings?.serviceTier ?? null) })]
+        : []),
     ].join('\n'));
   }
 
@@ -401,6 +425,8 @@ export class TelegramIngressRouter {
         return this.supportsRestartCommand();
       case 'mode':
         return this.host.config.bridgeEngine === 'gemini' || capabilities.guidedPlan === 'full';
+      case 'provider':
+        return this.host.config.bridgeEngine === 'codex' && this.host.config.codexProviderProfiles.length > 1;
       case 'plan':
         return capabilities.guidedPlan === 'full';
       case 'permissions':
@@ -418,5 +444,14 @@ export class TelegramIngressRouter {
 
   private supportsRestartCommand(): boolean {
     return (this.host.config.platform?.restartMode ?? 'service') !== 'none';
+  }
+
+  private resolveEffectiveCapabilities(scopeId: string): Pick<EngineCapabilities, 'reasoningEffort' | 'serviceTier'> {
+    const capabilities = resolveEngineCapabilities(this.host.providerCapabilities);
+    const profile = resolveCodexProviderProfile(this.host.config, this.host.store.getActiveProviderProfile(scopeId));
+    return {
+      reasoningEffort: resolveCodexProfileReasoningEffortSupport(profile, capabilities.reasoningEffort),
+      serviceTier: resolveCodexProfileServiceTierSupport(profile, capabilities.serviceTier),
+    };
   }
 }

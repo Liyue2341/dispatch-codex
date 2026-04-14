@@ -150,11 +150,11 @@ export class GeminiEngineProvider extends EventEmitter implements EngineProvider
     return Promise.resolve(threads);
   }
 
-  readThread(threadId: string): Promise<AppThread | null> {
+  readThread(threadId: string, _includeTurns = false, _scopeId?: string | null): Promise<AppThread | null> {
     return Promise.resolve(this.toAppThreadOrNull(threadId));
   }
 
-  readThreadWithTurns(threadId: string): Promise<AppThreadWithTurns | null> {
+  readThreadWithTurns(threadId: string, _scopeId?: string | null): Promise<AppThreadWithTurns | null> {
     const thread = this.toAppThreadOrNull(threadId);
     if (!thread) {
       return Promise.resolve(null);
@@ -176,7 +176,7 @@ export class GeminiEngineProvider extends EventEmitter implements EngineProvider
     return Promise.resolve({ ...thread, turns });
   }
 
-  renameThread(threadId: string, name: string): Promise<void> {
+  renameThread(threadId: string, name: string, _scopeId?: string | null): Promise<void> {
     const session = this.getOrCreateSession(threadId);
     session.name = name.trim() || null;
     session.updatedAt = Date.now();
@@ -286,7 +286,7 @@ export class GeminiEngineProvider extends EventEmitter implements EngineProvider
     throw unsupportedProviderFeature('gemini', 'steerTurn', 'Active-turn steering is not supported by Gemini CLI instances');
   }
 
-  async interruptTurn(_threadId: string, turnId: string): Promise<void> {
+  async interruptTurn(_threadId: string, turnId: string, _scopeId?: string | null): Promise<void> {
     const active = this.activeTurns.get(turnId);
     if (!active) {
       return;
@@ -295,15 +295,15 @@ export class GeminiEngineProvider extends EventEmitter implements EngineProvider
     active.process.cancel('SIGTERM');
   }
 
-  async respond(_requestId: string | number, _result: unknown): Promise<void> {
+  async respond(_requestId: string | number, _result: unknown, _scopeId?: string | null): Promise<void> {
     throw unsupportedProviderFeature('gemini', 'respond', 'Gemini CLI provider does not support interactive server requests');
   }
 
-  async respondError(_requestId: string | number, _message: string): Promise<void> {
+  async respondError(_requestId: string | number, _message: string, _scopeId?: string | null): Promise<void> {
     throw unsupportedProviderFeature('gemini', 'respondError', 'Gemini CLI provider does not support interactive server requests');
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(_scopeId?: string | null): Promise<ModelInfo[]> {
     const configured = [
       ...(this.config.geminiDefaultModel ? [this.config.geminiDefaultModel] : []),
       ...this.config.geminiModelAllowlist,

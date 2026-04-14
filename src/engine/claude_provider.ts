@@ -83,7 +83,7 @@ export class ClaudeEngineProvider extends EventEmitter implements EngineProvider
     threads: true,
     reveal: false,
     guidedPlan: 'none',
-    approvals: 'none',
+    approvals: 'limited',
     steerActiveTurn: false,
     rateLimits: false,
     reasoningEffort: false,
@@ -172,11 +172,11 @@ export class ClaudeEngineProvider extends EventEmitter implements EngineProvider
     return Promise.resolve(threads);
   }
 
-  readThread(threadId: string): Promise<AppThread | null> {
+  readThread(threadId: string, _includeTurns = false, _scopeId?: string | null): Promise<AppThread | null> {
     return Promise.resolve(this.toAppThreadOrNull(threadId));
   }
 
-  readThreadWithTurns(threadId: string): Promise<AppThreadWithTurns | null> {
+  readThreadWithTurns(threadId: string, _scopeId?: string | null): Promise<AppThreadWithTurns | null> {
     const thread = this.toAppThreadOrNull(threadId);
     if (!thread) {
       return Promise.resolve(null);
@@ -198,7 +198,7 @@ export class ClaudeEngineProvider extends EventEmitter implements EngineProvider
     return Promise.resolve({ ...thread, turns });
   }
 
-  renameThread(threadId: string, name: string): Promise<void> {
+  renameThread(threadId: string, name: string, _scopeId?: string | null): Promise<void> {
     const session = this.getOrCreateSession(threadId);
     session.name = name.trim() || null;
     session.updatedAt = Date.now();
@@ -254,7 +254,11 @@ export class ClaudeEngineProvider extends EventEmitter implements EngineProvider
       resumeSessionId,
       includeDirectories: this.config.claudeIncludeDirectories ?? [],
       allowedTools: this.config.claudeAllowedTools ?? [],
-      permissionMode: this.config.claudePermissionMode ?? 'default',
+      permissionMode: resolveClaudePermissionModeForAccess({
+        approvalPolicy: options.approvalPolicy,
+        sandboxMode: options.sandboxMode,
+        fallbackMode: this.config.claudePermissionMode ?? 'default',
+      }),
       timeoutMs: this.config.claudeHeadlessTimeoutMs ?? 15 * 60 * 1000,
     }, {
       onStdoutLine: (line) => {
@@ -312,7 +316,7 @@ export class ClaudeEngineProvider extends EventEmitter implements EngineProvider
     throw unsupportedProviderFeature('claude', 'steerTurn', 'Active-turn steering is not supported by Claude CLI instances');
   }
 
-  async interruptTurn(_threadId: string, turnId: string): Promise<void> {
+  async interruptTurn(_threadId: string, turnId: string, _scopeId?: string | null): Promise<void> {
     const active = this.activeTurns.get(turnId);
     if (!active) {
       return;
@@ -321,15 +325,15 @@ export class ClaudeEngineProvider extends EventEmitter implements EngineProvider
     active.process.cancel('SIGTERM');
   }
 
-  async respond(_requestId: string | number, _result: unknown): Promise<void> {
+  async respond(_requestId: string | number, _result: unknown, _scopeId?: string | null): Promise<void> {
     throw unsupportedProviderFeature('claude', 'respond', 'Claude CLI provider does not support interactive server requests');
   }
 
-  async respondError(_requestId: string | number, _message: string): Promise<void> {
+  async respondError(_requestId: string | number, _message: string, _scopeId?: string | null): Promise<void> {
     throw unsupportedProviderFeature('claude', 'respondError', 'Claude CLI provider does not support interactive server requests');
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(_scopeId?: string | null): Promise<ModelInfo[]> {
     const configured = [
       ...(this.config.claudeDefaultModel ? [this.config.claudeDefaultModel] : []),
       ...(this.config.claudeModelAllowlist ?? []),
@@ -808,6 +812,23 @@ function chunkText(value: string, size: number): string[] {
     chunks.push(value.slice(index, index + normalizedSize));
   }
   return chunks;
+}
+
+export function resolveClaudePermissionModeForAccess(options: {
+  approvalPolicy: StartTurnOptions['approvalPolicy'];
+  sandboxMode: StartTurnOptions['sandboxMode'];
+  fallbackMode: NonNullable<AppConfig['claudePermissionMode']>;
+}): NonNullable<AppConfig['claudePermissionMode']> {
+  if (options.sandboxMode === 'danger-full-access' || options.approvalPolicy === 'never') {
+    return 'bypassPermissions';
+  }
+  if (options.sandboxMode === 'read-only') {
+    return 'plan';
+  }
+  if (options.fallbackMode === 'acceptEdits' || options.fallbackMode === 'auto' || options.fallbackMode === 'dontAsk') {
+    return options.fallbackMode;
+  }
+  return 'default';
 }
 
 function buildClaudePrompt(input: TurnInput[], developerInstructions: string | null): string {

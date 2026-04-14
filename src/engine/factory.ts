@@ -6,10 +6,14 @@ import { createGeminiEngineProvider } from './gemini_provider.js';
 import { createOpenCodeEngineProvider } from './opencode_provider.js';
 import type { EngineProvider } from './types.js';
 
-export function createEngineProvider(config: AppConfig, logger: Logger): EngineProvider {
+export function createEngineProvider(
+  config: AppConfig,
+  logger: Logger,
+  resolveProfileIdForScope: (scopeId?: string | null) => string = () => config.codexDefaultProviderProfileId,
+): EngineProvider {
   switch (config.bridgeEngine) {
     case 'codex':
-      return createCodexEngineProvider(config, logger);
+      return createCodexEngineProvider(config, logger, resolveProfileIdForScope);
     case 'gemini':
       return createGeminiEngineProvider(config, logger);
     case 'claude':

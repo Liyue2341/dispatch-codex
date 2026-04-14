@@ -1,6 +1,7 @@
 import { t } from '../i18n.js';
 import type { Logger } from '../logger.js';
 import type { BridgeStore } from '../store/database.js';
+import { sanitizeAssistantText } from '../assistant_text.js';
 import type {
   AppLocale,
   AppThreadTurn,
@@ -75,6 +76,7 @@ export class ThreadPanelCoordinator {
     const threads = await this.host.app.listThreads({
       limit: offset + pageSize + 1,
       searchTerm: searchTerm ?? null,
+      scopeId,
     });
     const visibleThreads = threads.slice(offset, offset + pageSize);
     const hasNextPage = threads.length > offset + visibleThreads.length;
@@ -90,7 +92,7 @@ export class ThreadPanelCoordinator {
       index: offset + index,
       threadId: thread.threadId,
       name: this.host.store.getThreadNameOverride(scopeId, thread.threadId) ?? thread.name,
-      preview: thread.preview,
+      preview: sanitizeAssistantText(thread.preview) ?? thread.preview,
       cwd: thread.cwd,
       modelProvider: thread.modelProvider,
       status: thread.status,
@@ -201,7 +203,7 @@ export class ThreadPanelCoordinator {
     }
 
     try {
-      await this.host.app.renameThread(threadId, draft.proposedName);
+      await this.host.app.renameThread(threadId, draft.proposedName, scopeId);
     } catch (error) {
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'thread_rename_sync_failed', { error: formatUserError(error) }));
       return;
@@ -257,7 +259,7 @@ export class ThreadPanelCoordinator {
 
   async renderThreadHistoryPreview(scopeId: string, threadId: string, locale: AppLocale): Promise<void> {
     try {
-      const thread = await this.host.app.readThreadWithTurns(threadId);
+      const thread = await this.host.app.readThreadWithTurns(threadId, scopeId);
       if (!thread) {
         return;
       }
@@ -289,7 +291,7 @@ export class ThreadPanelCoordinator {
 
     const cached = this.host.store.listCachedThreads(scopeId).find((thread) => thread.threadId === threadId) ?? null;
     if (!cached) {
-      const thread = await this.host.app.readThread(threadId, false);
+      const thread = await this.host.app.readThread(threadId, false, scopeId);
       if (!thread) {
         return false;
       }
@@ -444,7 +446,7 @@ function sanitizeThreadHistoryPreviewText(value: string | null): string | null {
   if (!value) {
     return null;
   }
-  const normalizedValue = value.replace(/\r\n?/g, '\n').trim();
+  const normalizedValue = (sanitizeAssistantText(value) ?? value).replace(/\r\n?/g, '\n').trim();
   if (!normalizedValue) {
     return null;
   }

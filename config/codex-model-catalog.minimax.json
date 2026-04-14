@@ -1,0 +1,18 @@
+[
+  {
+    "model": "MiniMax-M2.7",
+    "displayName": "MiniMax-M2.7",
+    "description": "MiniMax M2.7 via CLIProxyAPI Responses proxy.",
+    "isDefault": true,
+    "supportedReasoningEfforts": ["low", "medium", "high"],
+    "defaultReasoningEffort": "medium"
+  },
+  {
+    "model": "MiniMax-M2.5",
+    "displayName": "MiniMax-M2.5",
+    "description": "MiniMax M2.5 via CLIProxyAPI Responses proxy.",
+    "isDefault": false,
+    "supportedReasoningEfforts": ["low", "medium", "high"],
+    "defaultReasoningEffort": "medium"
+  }
+]

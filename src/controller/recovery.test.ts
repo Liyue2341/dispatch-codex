@@ -45,6 +45,30 @@ function makeConfig(tempDir: string): AppConfig {
     tgAllowedChatId: null,
     tgAllowedTopicId: null,
     codexCliBin: 'codex',
+    codexProviderProfiles: [{
+      id: 'openai-native',
+      displayName: 'OpenAI Codex',
+      cliBin: 'codex',
+      modelCatalogPath: null,
+      modelCatalog: [],
+      defaultModel: null,
+      capabilities: {
+        reasoningEffort: true,
+        serviceTier: true,
+      },
+    }, {
+      id: 'cliproxyminimax',
+      displayName: 'CLIProxyAPI MiniMax',
+      cliBin: 'codex-via-cliproxy.sh',
+      modelCatalogPath: '/tmp/catalog.json',
+      modelCatalog: [],
+      defaultModel: 'MiniMax-M2.7',
+      capabilities: {
+        reasoningEffort: true,
+        serviceTier: false,
+      },
+    }],
+    codexDefaultProviderProfileId: 'openai-native',
     geminiCliBin: 'gemini',
     geminiDefaultModel: 'gemini-3-pro-preview',
     geminiModelAllowlist: ['gemini-3-pro-preview'],
@@ -220,5 +244,32 @@ test('controller.start requeues interrupted processing inputs before resuming th
     assert.equal(app.startTurnCalls.length, 1);
     assert.equal(app.startTurnCalls[0]?.input?.[0]?.text, 'Resume stuck item');
     assert.equal(store.getQueuedTurnInput('queue-stuck')?.status, 'processing');
+  });
+});
+
+test('controller.start omits unsupported service tier when the active profile disables it', async () => {
+  await withController(async (controller, store, _bot, app, tempDir) => {
+    store.setActiveProviderProfile('chat-1', 'cliproxyminimax');
+    store.setChatSettings('chat-1', 'MiniMax-M2.7', 'high', 'en');
+    store.setChatServiceTier('chat-1', 'fast');
+    store.setBinding('chat-1', 'thread-1', tempDir);
+    store.saveQueuedTurnInput({
+      queueId: 'queue-minimax',
+      scopeId: 'chat-1',
+      chatId: 'chat-1',
+      threadId: 'thread-1',
+      input: [{ type: 'text', text: 'Resume minimax', text_elements: [] }],
+      sourceSummary: 'Resume minimax',
+      telegramMessageId: null,
+      status: 'queued',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    await controller.start();
+
+    assert.equal(app.startTurnCalls.length, 1);
+    assert.equal(app.startTurnCalls[0]?.serviceTier, null);
+    assert.equal(app.startTurnCalls[0]?.effort, 'high');
   });
 });

@@ -5,12 +5,28 @@ import { spawnSync } from 'node:child_process';
 import dotenv from 'dotenv';
 import type { LogLevel } from './logger.js';
 import { detectPlatformCapabilities, getCommandLookupProgram, type PlatformCapabilities } from './platform/capabilities.js';
-import type { ApprovalPolicyValue, SandboxModeValue } from './types.js';
+import type { ApprovalPolicyValue, ModelInfo, ReasoningEffortValue, SandboxModeValue } from './types.js';
 
 export type BridgeEngineValue = 'codex' | 'gemini' | 'claude' | 'opencode';
 
 export const LEGACY_APP_HOME = path.join(os.homedir(), '.telegram-codex-app-bridge');
 export const INSTANCES_APP_HOME = path.join(LEGACY_APP_HOME, 'instances');
+
+export interface CodexProviderProfileConfig {
+  id: string;
+  displayName: string;
+  cliBin: string;
+  modelCatalogPath: string | null;
+  modelCatalog: ModelInfo[];
+  defaultModel: string | null;
+  providerLabel?: string | null;
+  backendBaseUrl?: string | null;
+  modelCatalogMode?: 'merge' | 'overlay-only';
+  capabilities?: {
+    reasoningEffort?: boolean;
+    serviceTier?: boolean;
+  } | null;
+}
 
 export interface AppConfig {
   envFile: string;
@@ -23,6 +39,10 @@ export interface AppConfig {
   tgAllowedChatId: string | null;
   tgAllowedTopicId: number | null;
   codexCliBin: string;
+  codexModelCatalogPath?: string | null;
+  codexModelCatalog?: ModelInfo[];
+  codexProviderProfiles: CodexProviderProfileConfig[];
+  codexDefaultProviderProfileId: string;
   geminiCliBin: string;
   claudeCliBin?: string;
   opencodeCliBin?: string;
@@ -61,6 +81,23 @@ export function loadConfig(): AppConfig {
   const envFile = loadEnvFile();
   const platform = detectPlatformCapabilities();
   const runtimePaths = resolveBridgeRuntimePaths();
+  const requestedDefaultProviderId = optional('CODEX_PROVIDER_ID');
+  const codexProviderProfiles = loadCodexProviderProfiles({
+    codexRealBin: process.env.CODEX_REAL_BIN || resolveCommand('codex') || 'codex',
+    codexProxyBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
+    codexProxyModelCatalogPath: optional('CODEX_MODEL_CATALOG_PATH'),
+    codexProxyDefaultModel: optional('CODEX_PROVIDER_DEFAULT_MODEL') ?? 'MiniMax-M2.7',
+    codexProxyDisplayName: optional('CODEX_PROVIDER_NAME') ?? 'CLIProxyAPI MiniMax',
+    codexProxyProviderLabel: optional('CODEX_PROVIDER_ID') ?? 'cliproxyminimax',
+    codexProxyBaseUrl: optional('CODEX_PROVIDER_BASE_URL'),
+    defaultProviderId: requestedDefaultProviderId,
+  });
+  const codexDefaultProviderProfileId = codexProviderProfiles.some((profile) => profile.id === (requestedDefaultProviderId ?? ''))
+    ? String(requestedDefaultProviderId!)
+    : codexProviderProfiles[0]?.id ?? 'openai-native';
+  const defaultCodexProfile = codexProviderProfiles.find((profile) => profile.id === codexDefaultProviderProfileId)
+    ?? codexProviderProfiles[0]
+    ?? null;
   const config: AppConfig = {
     envFile,
     platform,
@@ -71,7 +108,11 @@ export function loadConfig(): AppConfig {
     tgAllowedUserId: required('TG_ALLOWED_USER_ID'),
     tgAllowedChatId: optional('TG_ALLOWED_CHAT_ID'),
     tgAllowedTopicId: nullableIntEnv('TG_ALLOWED_TOPIC_ID'),
-    codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
+    codexCliBin: defaultCodexProfile?.cliBin ?? (process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex'),
+    codexModelCatalogPath: defaultCodexProfile?.modelCatalogPath ?? optional('CODEX_MODEL_CATALOG_PATH'),
+    codexModelCatalog: defaultCodexProfile?.modelCatalog ?? loadCodexModelCatalog(optional('CODEX_MODEL_CATALOG_PATH')),
+    codexProviderProfiles,
+    codexDefaultProviderProfileId,
     geminiCliBin: process.env.GEMINI_CLI_BIN || resolveCommand('gemini') || 'gemini',
     claudeCliBin: process.env.CLAUDE_CLI_BIN || resolveCommand('claude') || 'claude',
     opencodeCliBin: process.env.OPENCODE_CLI_BIN || resolveCommand('opencode') || 'opencode',
@@ -125,6 +166,59 @@ export function loadEnvFile(env = process.env, cwd = process.cwd()): string {
   const envFile = resolveEnvFilePath(env, cwd);
   dotenv.config({ path: envFile });
   return envFile;
+}
+
+export function loadCodexProviderProfiles(options: {
+  codexRealBin: string;
+  codexProxyBin: string;
+  codexProxyModelCatalogPath: string | null;
+  codexProxyDefaultModel: string | null;
+  codexProxyDisplayName: string;
+  codexProxyProviderLabel: string;
+  codexProxyBaseUrl: string | null;
+  defaultProviderId: string | null;
+}): CodexProviderProfileConfig[] {
+  const openaiProfile: CodexProviderProfileConfig = {
+    id: 'openai-native',
+    displayName: 'OpenAI Codex',
+    cliBin: options.codexRealBin,
+    modelCatalogPath: null,
+    modelCatalog: [],
+    defaultModel: null,
+    providerLabel: 'openai',
+    backendBaseUrl: null,
+    modelCatalogMode: 'merge',
+    capabilities: {
+      reasoningEffort: true,
+      serviceTier: true,
+    },
+  };
+  const proxyProfile: CodexProviderProfileConfig = {
+    id: 'cliproxyminimax',
+    displayName: options.codexProxyDisplayName,
+    cliBin: options.codexProxyBin,
+    modelCatalogPath: options.codexProxyModelCatalogPath,
+    modelCatalog: loadCodexModelCatalog(options.codexProxyModelCatalogPath),
+    defaultModel: options.codexProxyDefaultModel,
+    providerLabel: options.codexProxyProviderLabel,
+    backendBaseUrl: options.codexProxyBaseUrl,
+    modelCatalogMode: 'overlay-only',
+    capabilities: {
+      reasoningEffort: true,
+      serviceTier: false,
+    },
+  };
+  const preferredId = options.defaultProviderId?.trim().toLowerCase();
+  const defaultProfileId = preferredId === 'openai-native'
+    ? openaiProfile.id
+    : preferredId === 'cliproxyminimax'
+      ? proxyProfile.id
+      : options.codexProxyModelCatalogPath
+        ? proxyProfile.id
+        : openaiProfile.id;
+  return defaultProfileId === proxyProfile.id
+    ? [proxyProfile, openaiProfile]
+    : [openaiProfile, proxyProfile];
 }
 
 export function resolveEnvFilePath(env = process.env, cwd = process.cwd()): string {
@@ -269,6 +363,107 @@ function listEnv(key: string): string[] {
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function loadCodexModelCatalog(catalogPath: string | null): ModelInfo[] {
+  if (!catalogPath) {
+    return [];
+  }
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.resolve(catalogPath), 'utf8')) as unknown;
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw
+      .map(parseCodexCatalogEntry)
+      .filter((entry): entry is ModelInfo => entry !== null);
+  } catch {
+    return [];
+  }
+}
+
+function parseCodexCatalogEntry(value: unknown): ModelInfo | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  const entry = value as Record<string, unknown>;
+  const model = typeof entry.model === 'string' && entry.model.trim() ? entry.model.trim() : null;
+  if (!model) {
+    return null;
+  }
+  const supportedReasoningEfforts = parseReasoningEffortList(entry.supportedReasoningEfforts);
+  const defaultReasoningEffort = parseReasoningEffort(entry.defaultReasoningEffort)
+    ?? supportedReasoningEfforts[0]
+    ?? 'none';
+  const supportedVariants = Array.isArray(entry.supportedVariants)
+    ? entry.supportedVariants
+      .map((variant) => typeof variant === 'string' ? variant.trim() : '')
+      .filter(Boolean)
+    : undefined;
+  const variantReasoningEfforts = entry.variantReasoningEfforts && typeof entry.variantReasoningEfforts === 'object'
+    ? Object.fromEntries(
+        Object.entries(entry.variantReasoningEfforts as Record<string, unknown>)
+          .map(([variant, effort]) => {
+            const normalizedVariant = variant.trim();
+            if (!normalizedVariant) {
+              return null;
+            }
+            return [normalizedVariant, parseReasoningEffort(effort)] as const;
+          })
+          .filter((pair): pair is readonly [string, ReasoningEffortValue | null] => pair !== null),
+      )
+    : undefined;
+  const parsed: ModelInfo = {
+    id: typeof entry.id === 'string' && entry.id.trim() ? entry.id.trim() : model,
+    model,
+    displayName: typeof entry.displayName === 'string' && entry.displayName.trim() ? entry.displayName.trim() : model,
+    description: typeof entry.description === 'string' ? entry.description : '',
+    isDefault: Boolean(entry.isDefault),
+    supportedReasoningEfforts,
+    defaultReasoningEffort,
+  };
+  if (supportedVariants && supportedVariants.length > 0) {
+    parsed.supportedVariants = supportedVariants;
+  }
+  if (variantReasoningEfforts && Object.keys(variantReasoningEfforts).length > 0) {
+    parsed.variantReasoningEfforts = variantReasoningEfforts;
+  }
+  return parsed;
+}
+
+function parseReasoningEffortList(value: unknown): ReasoningEffortValue[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const efforts: ReasoningEffortValue[] = [];
+  const seen = new Set<ReasoningEffortValue>();
+  for (const entry of value) {
+    const normalized = parseReasoningEffort(entry);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    efforts.push(normalized);
+  }
+  return efforts;
+}
+
+function parseReasoningEffort(value: unknown): ReasoningEffortValue | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (
+    normalized === 'none'
+    || normalized === 'minimal'
+    || normalized === 'low'
+    || normalized === 'medium'
+    || normalized === 'high'
+    || normalized === 'xhigh'
+  ) {
+    return normalized;
+  }
+  return null;
 }
 
 function parseLogLevel(value: string): LogLevel {

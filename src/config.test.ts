@@ -125,3 +125,38 @@ test('loadConfig reads bridge runtime settings from ENV_FILE', () => {
     assert.equal(config.lockPath, path.join(bridgeHome, 'runtime', 'bridge.lock'));
   });
 });
+
+test('loadConfig reads Codex model catalog from a JSON file', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'telegram-codex-model-catalog-test-'));
+  const envFile = path.join(tempDir, '.env.codex');
+  const catalogPath = path.join(tempDir, 'catalog.json');
+  fs.writeFileSync(catalogPath, JSON.stringify([
+    {
+      model: 'MiniMax-M2.7',
+      displayName: 'MiniMax-M2.7',
+      isDefault: true,
+      supportedReasoningEfforts: ['low', 'medium', 'high'],
+      defaultReasoningEffort: 'medium',
+    },
+  ]), 'utf8');
+  fs.writeFileSync(envFile, [
+    'TG_BOT_TOKEN=test-token',
+    'TG_ALLOWED_USER_ID=1',
+    'BRIDGE_ENGINE=codex',
+    `CODEX_MODEL_CATALOG_PATH=${catalogPath}`,
+  ].join('\n'), 'utf8');
+
+  withPatchedEnv({
+    ENV_FILE: envFile,
+    TG_BOT_TOKEN: undefined,
+    TG_ALLOWED_USER_ID: undefined,
+    BRIDGE_ENGINE: undefined,
+    CODEX_MODEL_CATALOG_PATH: undefined,
+  }, () => {
+    const config = loadConfig();
+    assert.equal(config.codexModelCatalogPath, catalogPath);
+    assert.ok(config.codexModelCatalog);
+    assert.deepEqual(config.codexModelCatalog.map((model) => model.model), ['MiniMax-M2.7']);
+    assert.equal(config.codexModelCatalog[0]?.isDefault, true);
+  });
+});

@@ -1,4 +1,9 @@
-import type { AppConfig } from '../config.js';
+import type { AppConfig, CodexProviderProfileConfig } from '../config.js';
+import {
+  resolveCodexProfileReasoningEffortSupport,
+  resolveCodexProfileServiceTierSupport,
+  resolveCodexProviderProfile,
+} from '../codex_profiles.js';
 import { resolveEngineCapabilities, type EngineProvider } from '../engine/types.js';
 import { t } from '../i18n.js';
 import type { BridgeStore } from '../store/database.js';
@@ -10,6 +15,7 @@ import {
   buildSettingsHomeKeyboard,
   buildModeSettingsKeyboard,
   buildModelSettingsKeyboard,
+  buildProviderSettingsKeyboard,
   clampEffortToModel,
   clampVariantToModel,
   formatAccessPresetLabel,
@@ -21,6 +27,8 @@ import {
   formatModelDisplayName,
   formatModeSettingsMessage,
   formatModelSettingsMessage,
+  formatProviderProfileLabel,
+  formatProviderSettingsMessage,
   formatServiceTierLabel,
   formatSettingsHomeMessage,
   formatSandboxModeLabel,
@@ -74,12 +82,22 @@ export class SettingsCoordinator {
     return this.capabilities.approvals !== 'none';
   }
 
-  private supportsReasoningEffort(): boolean {
-    return this.capabilities.reasoningEffort;
+  private supportsProviderSettings(): boolean {
+    return this.host.config.bridgeEngine === 'codex' && this.host.config.codexProviderProfiles.length > 1;
   }
 
-  private supportsServiceTier(): boolean {
-    return this.capabilities.serviceTier;
+  private supportsReasoningEffort(scopeId: string): boolean {
+    return resolveCodexProfileReasoningEffortSupport(
+      this.getActiveCodexProfile(scopeId),
+      this.capabilities.reasoningEffort,
+    );
+  }
+
+  private supportsServiceTier(scopeId: string): boolean {
+    return resolveCodexProfileServiceTierSupport(
+      this.getActiveCodexProfile(scopeId),
+      this.capabilities.serviceTier,
+    );
   }
 
   resolveEffectiveAccess(scopeId: string, settings = this.host.store.getChatSettings(scopeId)): ResolvedAccessMode {
@@ -93,6 +111,27 @@ export class SettingsCoordinator {
   shouldRequirePlanConfirmation(scopeId: string, settings = this.host.store.getChatSettings(scopeId)): boolean {
     return (settings?.collaborationMode ?? null) === 'plan'
       && (settings?.confirmPlanBeforeExecute ?? true);
+  }
+
+  async handleProviderCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
+    if (!this.supportsProviderSettings()) {
+      await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'provider' }));
+      return;
+    }
+    const scopeId = event.scopeId;
+    if (args.length === 0) {
+      await this.showProviderSettingsPanel(scopeId, undefined, locale);
+      return;
+    }
+    const requested = args.join(' ').trim();
+    const profile = this.resolveRequestedProviderProfile(requested);
+    if (!profile) {
+      await this.host.messages.sendMessage(scopeId, t(locale, 'provider_unknown', { value: requested }));
+      await this.showProviderSettingsPanel(scopeId, undefined, locale);
+      return;
+    }
+    const result = await this.applyProviderProfile(scopeId, profile.id, locale);
+    await this.host.messages.sendMessage(scopeId, result.message);
   }
 
   async handleModeCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
@@ -184,7 +223,7 @@ export class SettingsCoordinator {
     }
     const settings = this.host.store.getChatSettings(scopeId);
     const raw = args.join(' ').trim();
-    const models = await this.host.app.listModels();
+    const models = await this.host.app.listModels(scopeId);
     if (raw === '' || raw.toLowerCase() === 'default' || raw.toLowerCase() === 'reset') {
       const defaultModel = resolveCurrentModel(models, null);
       const nextEffort = clampEffortToModel(defaultModel, settings?.reasoningEffort ?? null);
@@ -232,7 +271,7 @@ export class SettingsCoordinator {
   }
 
   async handleEffortCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
-    if (!this.supportsReasoningEffort()) {
+    if (!this.supportsReasoningEffort(event.scopeId)) {
       await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'effort' }));
       return;
     }
@@ -246,7 +285,7 @@ export class SettingsCoordinator {
       return;
     }
     const settings = this.host.store.getChatSettings(scopeId);
-    const models = await this.host.app.listModels();
+    const models = await this.host.app.listModels(scopeId);
     const currentModel = resolveCurrentModel(models, settings?.model ?? null);
     const raw = args.join(' ').trim().toLowerCase();
     if (raw === 'default' || raw === 'reset') {
@@ -287,7 +326,7 @@ export class SettingsCoordinator {
   }
 
   async handleTierCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
-    if (!this.supportsServiceTier()) {
+    if (!this.supportsServiceTier(event.scopeId)) {
       await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'tier' }));
       return;
     }
@@ -309,7 +348,7 @@ export class SettingsCoordinator {
   }
 
   async handleFastCommand(event: TelegramTextEvent, locale: AppLocale, args: string[]): Promise<void> {
-    if (!this.supportsServiceTier()) {
+    if (!this.supportsServiceTier(event.scopeId)) {
       await this.host.messages.sendMessage(event.scopeId, t(locale, 'command_not_supported', { name: 'fast' }));
       return;
     }
@@ -354,15 +393,15 @@ export class SettingsCoordinator {
       await this.handleModeSettingsCallback(event, rawValue, locale);
       return;
     }
-    if (kind === 'effort' && !this.supportsReasoningEffort()) {
+    if (kind === 'effort' && !this.supportsReasoningEffort(scopeId)) {
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
-    if (kind === 'tier' && !this.supportsServiceTier()) {
+    if (kind === 'tier' && !this.supportsServiceTier(scopeId)) {
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
       return;
     }
-    const models = await this.host.app.listModels();
+    const models = await this.host.app.listModels(scopeId);
     const settings = this.host.store.getChatSettings(scopeId);
     const value = kind === 'model' ? decodeURIComponent(rawValue) : rawValue;
     if (kind === 'model') {
@@ -477,13 +516,22 @@ export class SettingsCoordinator {
 
   async handleNavigationCallback(
     event: TelegramCallbackEvent,
-    target: 'models' | 'mode' | 'threads' | 'reveal' | 'permissions',
+    target: 'models' | 'provider' | 'mode' | 'threads' | 'reveal' | 'permissions',
     locale: AppLocale,
   ): Promise<void> {
     const scopeId = event.scopeId;
     if (target === 'models') {
       await this.showModelSettingsPanel(scopeId, event.messageId, locale);
       await this.host.answerCallback(event.callbackQueryId, t(locale, 'opened_model_settings'));
+      return;
+    }
+    if (target === 'provider') {
+      if (!this.supportsProviderSettings()) {
+        await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+        return;
+      }
+      await this.showProviderSettingsPanel(scopeId, event.messageId, locale);
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'opened_provider_settings'));
       return;
     }
     if (target === 'mode') {
@@ -534,12 +582,15 @@ export class SettingsCoordinator {
     const binding = this.host.store.getBinding(scopeId);
     const settings = this.host.store.getChatSettings(scopeId);
     const access = this.resolveEffectiveAccess(scopeId, settings);
-    const showEffort = this.supportsReasoningEffort();
-    const showServiceTier = this.supportsServiceTier();
+    const activeProfile = this.getActiveProviderProfile(scopeId);
+    const activeProfileLabel = this.supportsProviderSettings() ? formatProviderProfileLabel(activeProfile) : null;
+    const showEffort = this.supportsReasoningEffort(scopeId);
+    const showServiceTier = this.supportsServiceTier(scopeId);
     const showMode = this.supportsModeSettings();
     const showAccess = this.supportsAccessSettings();
     if (!binding) {
       const text = [
+        activeProfileLabel ? t(locale, 'where_active_profile', { value: activeProfileLabel }) : null,
         t(locale, 'where_no_thread_bound'),
         t(locale, 'where_configured_model', { value: formatModelDisplayName(settings?.model) ?? t(locale, 'server_default') }),
         showEffort ? t(locale, 'where_configured_effort', { value: settings?.reasoningEffort ?? t(locale, 'server_default') }) : null,
@@ -552,6 +603,7 @@ export class SettingsCoordinator {
       ].filter(Boolean).join('\n');
       const keyboard = whereKeyboard(locale, {
         hasBinding: false,
+        showProvider: this.supportsProviderSettings(),
         showMode,
         showAccess,
         showThreads: this.capabilities.threads,
@@ -565,11 +617,12 @@ export class SettingsCoordinator {
       return;
     }
     const readyBinding = await this.host.sessions.ensureThreadReady(scopeId, binding);
-    const thread = await this.host.app.readThread(readyBinding.threadId, false);
+    const thread = await this.host.app.readThread(readyBinding.threadId, false, scopeId);
     if (!thread) {
       const text = t(locale, 'where_thread_unavailable', { threadId: readyBinding.threadId });
       const keyboard = whereKeyboard(locale, {
         hasBinding: false,
+        showProvider: this.supportsProviderSettings(),
         showMode,
         showAccess,
         showThreads: this.capabilities.threads,
@@ -587,6 +640,7 @@ export class SettingsCoordinator {
       name: this.host.store.getThreadNameOverride(scopeId, thread.threadId) ?? thread.name,
     };
     const text = formatWhereMessage(locale, this.host.config.bridgeEngine, threadWithDisplayName, settings, this.host.config.defaultCwd, access, {
+      activeProfileLabel,
       showEffort,
       showServiceTier,
       showMode,
@@ -594,6 +648,7 @@ export class SettingsCoordinator {
     });
     const keyboard = whereKeyboard(locale, {
       hasBinding: true,
+      showProvider: this.supportsProviderSettings(),
       showMode,
       showAccess,
       showThreads: this.capabilities.threads,
@@ -607,16 +662,41 @@ export class SettingsCoordinator {
   }
 
   async showModelSettingsPanel(scopeId: string, messageId?: number, locale = this.host.localeForChat(scopeId)): Promise<void> {
-    const models = await this.host.app.listModels();
+    const models = await this.host.app.listModels(scopeId);
     const settings = this.host.store.getChatSettings(scopeId);
     const text = formatModelSettingsMessage(locale, models, settings, {
-      showEffort: this.supportsReasoningEffort(),
-      showServiceTier: this.supportsServiceTier(),
+      showEffort: this.supportsReasoningEffort(scopeId),
+      showServiceTier: this.supportsServiceTier(scopeId),
     });
     const keyboard = buildModelSettingsKeyboard(locale, models, settings, {
-      showEffort: this.supportsReasoningEffort(),
-      showServiceTier: this.supportsServiceTier(),
+      showEffort: this.supportsReasoningEffort(scopeId),
+      showServiceTier: this.supportsServiceTier(scopeId),
     });
+    if (messageId !== undefined) {
+      await this.host.messages.editHtmlMessage(scopeId, messageId, text, keyboard);
+      return;
+    }
+    await this.host.messages.sendHtmlMessage(scopeId, text, keyboard);
+  }
+
+  async showProviderSettingsPanel(scopeId: string, messageId?: number, locale = this.host.localeForChat(scopeId)): Promise<void> {
+    if (!this.supportsProviderSettings()) {
+      await this.host.messages.sendMessage(scopeId, t(locale, 'command_not_supported', { name: 'provider' }));
+      return;
+    }
+    const activeProfile = this.getActiveProviderProfile(scopeId);
+    const binding = this.host.store.getBinding(scopeId);
+    const text = formatProviderSettingsMessage(
+      locale,
+      scopeId,
+      activeProfile,
+      binding?.threadId ?? null,
+    );
+    const keyboard = buildProviderSettingsKeyboard(
+      locale,
+      this.host.config.codexProviderProfiles,
+      activeProfile.id,
+    );
     if (messageId !== undefined) {
       await this.host.messages.editHtmlMessage(scopeId, messageId, text, keyboard);
       return;
@@ -662,6 +742,7 @@ export class SettingsCoordinator {
       scopeId,
       engine: this.host.config.bridgeEngine,
       instanceId: this.host.config.bridgeInstanceId,
+      activeProfileLabel: this.supportsProviderSettings() ? formatProviderProfileLabel(this.getActiveProviderProfile(scopeId)) : null,
       threadId: binding?.threadId ?? null,
       cwd: binding?.cwd ?? this.host.config.defaultCwd,
       settings,
@@ -669,13 +750,14 @@ export class SettingsCoordinator {
       queueDepth: this.host.store.countQueuedTurnInputs(scopeId),
       activeTurnId: this.host.turns.findByScope(scopeId)?.turnId ?? null,
     }, {
-      showEffort: this.supportsReasoningEffort(),
-      showServiceTier: this.supportsServiceTier(),
+      showEffort: this.supportsReasoningEffort(scopeId),
+      showServiceTier: this.supportsServiceTier(scopeId),
       showMode: this.supportsModeSettings(),
       showAccess: this.supportsAccessSettings(),
       showPlanControls: this.supportsGuidedPlan(),
     });
     const keyboard = buildSettingsHomeKeyboard(locale, settings, {
+      showProvider: this.supportsProviderSettings(),
       showMode: this.supportsModeSettings(),
       showAccess: this.supportsAccessSettings(),
       showPlanControls: this.supportsGuidedPlan(),
@@ -726,6 +808,22 @@ export class SettingsCoordinator {
     }));
   }
 
+  async handleProviderSettingsCallback(event: TelegramCallbackEvent, rawValue: string, locale: AppLocale): Promise<void> {
+    if (!this.supportsProviderSettings()) {
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
+    const providerId = decodeURIComponent(rawValue);
+    const profile = this.resolveRequestedProviderProfile(providerId);
+    if (!profile) {
+      await this.host.answerCallback(event.callbackQueryId, t(locale, 'unsupported_action'));
+      return;
+    }
+    const result = await this.applyProviderProfile(event.scopeId, profile.id, locale);
+    await this.refreshProviderSettingsPanel(event.scopeId, event.messageId, locale);
+    await this.host.answerCallback(event.callbackQueryId, result.callbackText);
+  }
+
   private async applyServiceTier(scopeId: string, serviceTier: ServiceTierValue | null, locale: AppLocale): Promise<void> {
     this.host.store.setChatServiceTier(scopeId, serviceTier);
     await this.host.messages.sendMessage(scopeId, [
@@ -738,19 +836,30 @@ export class SettingsCoordinator {
   }
 
   private async refreshModelSettingsPanel(scopeId: string, messageId: number, locale: AppLocale, models?: ModelInfo[]): Promise<void> {
-    const resolvedModels = models ?? await this.host.app.listModels();
+    const resolvedModels = models ?? await this.host.app.listModels(scopeId);
     const settings = this.host.store.getChatSettings(scopeId);
     await this.host.messages.editHtmlMessage(
       scopeId,
       messageId,
       formatModelSettingsMessage(locale, resolvedModels, settings, {
-        showEffort: this.supportsReasoningEffort(),
-        showServiceTier: this.supportsServiceTier(),
+        showEffort: this.supportsReasoningEffort(scopeId),
+        showServiceTier: this.supportsServiceTier(scopeId),
       }),
       buildModelSettingsKeyboard(locale, resolvedModels, settings, {
-        showEffort: this.supportsReasoningEffort(),
-        showServiceTier: this.supportsServiceTier(),
+        showEffort: this.supportsReasoningEffort(scopeId),
+        showServiceTier: this.supportsServiceTier(scopeId),
       }),
+    );
+  }
+
+  private async refreshProviderSettingsPanel(scopeId: string, messageId: number, locale: AppLocale): Promise<void> {
+    const activeProfile = this.getActiveProviderProfile(scopeId);
+    const binding = this.host.store.getBinding(scopeId);
+    await this.host.messages.editHtmlMessage(
+      scopeId,
+      messageId,
+      formatProviderSettingsMessage(locale, scopeId, activeProfile, binding?.threadId ?? null),
+      buildProviderSettingsKeyboard(locale, this.host.config.codexProviderProfiles, activeProfile.id),
     );
   }
 
@@ -779,6 +888,102 @@ export class SettingsCoordinator {
     return clearedPlanSessions;
   }
 
+  private async applyProviderProfile(
+    scopeId: string,
+    providerProfileId: string,
+    locale: AppLocale,
+  ): Promise<{ message: string; callbackText: string }> {
+    const currentProfile = this.getActiveProviderProfile(scopeId);
+    if (currentProfile.id === providerProfileId) {
+      const label = formatProviderProfileLabel(currentProfile);
+      return {
+        message: [
+          t(locale, 'provider_already_selected', { value: label }),
+          t(locale, 'line_scope', { value: formatTelegramScopeLabel(locale, scopeId) }),
+        ].join('\n'),
+        callbackText: t(locale, 'provider_already_selected', { value: label }),
+      };
+    }
+    if (this.host.turns.findByScope(scopeId)) {
+      const text = t(locale, 'provider_change_blocked_active_turn');
+      return { message: text, callbackText: text };
+    }
+    const blockers = this.collectProviderSwitchBlockers(scopeId, locale);
+    if (blockers.length > 0) {
+      const text = [t(locale, 'provider_change_blocked_busy'), ...blockers.map((entry) => `- ${entry}`)].join('\n');
+      return {
+        message: text,
+        callbackText: t(locale, 'provider_change_blocked_busy'),
+      };
+    }
+
+    const previousLocale = this.host.store.getChatSettings(scopeId)?.locale ?? locale;
+    this.host.store.setActiveProviderProfile(scopeId, providerProfileId);
+    if (!this.host.store.getChatSettings(scopeId)?.locale) {
+      this.host.store.setChatLocale(scopeId, previousLocale);
+    }
+
+    const nextProfile = this.getActiveProviderProfile(scopeId);
+    const nextBinding = this.host.store.getBinding(scopeId);
+    const lines = [
+      t(locale, 'provider_switched', { value: formatProviderProfileLabel(nextProfile) }),
+      t(locale, 'line_scope', { value: formatTelegramScopeLabel(locale, scopeId) }),
+      nextBinding
+        ? t(locale, 'provider_existing_thread', { value: nextBinding.threadId })
+        : t(locale, 'provider_next_turn_new_thread'),
+    ];
+    return {
+      message: lines.join('\n'),
+      callbackText: t(locale, 'callback_provider', { value: nextProfile.displayName }),
+    };
+  }
+
+  private collectProviderSwitchBlockers(scopeId: string, locale: AppLocale): string[] {
+    const blockers: string[] = [];
+    if (this.host.store.countQueuedTurnInputs(scopeId) > 0) {
+      blockers.push(t(locale, 'provider_blocker_queue'));
+    }
+    if (this.host.store.countPendingAttachmentBatches(scopeId) > 0) {
+      blockers.push(t(locale, 'provider_blocker_attachments'));
+    }
+    if (this.host.store.listPendingApprovals(scopeId).length > 0) {
+      blockers.push(t(locale, 'provider_blocker_approvals'));
+    }
+    if (this.host.store.getPendingUserInputForChat(scopeId)) {
+      blockers.push(t(locale, 'provider_blocker_inputs'));
+    }
+    if (this.host.store.listOpenPlanSessions(scopeId).length > 0) {
+      blockers.push(t(locale, 'provider_blocker_plans'));
+    }
+    return blockers;
+  }
+
+  private resolveRequestedProviderProfile(requested: string) {
+    const normalized = requested.trim().toLowerCase();
+    if (normalized === 'default' || normalized === 'auto') {
+      return this.host.config.codexProviderProfiles.find(
+        (profile) => profile.id === this.host.config.codexDefaultProviderProfileId,
+      ) ?? this.host.config.codexProviderProfiles[0] ?? null;
+    }
+    return this.host.config.codexProviderProfiles.find((profile) => {
+      const candidates = [
+        profile.id,
+        profile.displayName,
+        profile.providerLabel ?? '',
+      ].map((value) => value.trim().toLowerCase()).filter(Boolean);
+      return candidates.includes(normalized);
+    }) ?? null;
+  }
+
+  private getActiveProviderProfile(scopeId: string): CodexProviderProfileConfig {
+    return this.getActiveCodexProfile(scopeId)
+      ?? this.host.config.codexProviderProfiles[0]!;
+  }
+
+  private getActiveCodexProfile(scopeId: string): CodexProviderProfileConfig | null {
+    return resolveCodexProviderProfile(this.host.config, this.host.store.getActiveProviderProfile(scopeId));
+  }
+
   private async refreshAccessSettingsPanel(scopeId: string, messageId: number, locale: AppLocale): Promise<void> {
     const access = this.resolveEffectiveAccess(scopeId);
     await this.host.messages.editHtmlMessage(
@@ -794,6 +999,7 @@ function whereKeyboard(
   locale: AppLocale,
   options: {
     hasBinding: boolean;
+    showProvider: boolean;
     showMode: boolean;
     showAccess: boolean;
     showThreads: boolean;
@@ -801,6 +1007,7 @@ function whereKeyboard(
   },
 ): Array<Array<{ text: string; callback_data: string }>> {
   const firstRow = [
+    ...(options.showProvider ? [{ text: t(locale, 'button_provider'), callback_data: 'nav:provider' }] : []),
     ...(options.showMode ? [{ text: t(locale, 'button_mode'), callback_data: 'nav:mode' }] : []),
     ...(options.showAccess ? [{ text: t(locale, 'button_permissions'), callback_data: 'nav:permissions' }] : []),
   ];
@@ -814,6 +1021,7 @@ function whereKeyboard(
   const rows: Array<Array<{ text: string; callback_data: string }>> = [];
   const bindingRow = [
     ...(options.showReveal ? [{ text: t(locale, 'button_reveal'), callback_data: 'nav:reveal' }] : []),
+    ...(options.showProvider ? [{ text: t(locale, 'button_provider'), callback_data: 'nav:provider' }] : []),
     ...(options.showMode ? [{ text: t(locale, 'button_mode'), callback_data: 'nav:mode' }] : []),
   ];
   if (bindingRow.length > 0) {

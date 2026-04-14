@@ -10,6 +10,7 @@ import type { TurnCompletionState } from './turn_completion.js';
 
 export interface ActiveTurnLifecycleState extends TurnRenderingState, GuidedPlanTurnState {
   chatId: string;
+  profileId?: string | null;
   topicId: number | null;
   renderRoute: TelegramRenderRoute;
   queuedInputId: string | null;
@@ -85,7 +86,12 @@ export class TurnLifecycleCoordinator {
     threadId: string,
     turnId: string,
     previewMessageId: number,
-    options: { guidedPlanSessionId?: string | null; guidedPlanDraftOnly?: boolean; queuedInputId?: string | null } = {},
+    options: {
+      guidedPlanSessionId?: string | null;
+      guidedPlanDraftOnly?: boolean;
+      queuedInputId?: string | null;
+      profileId?: string | null;
+    } = {},
   ): Promise<void> {
     let resolveTurn!: () => void;
     const waitForTurn = new Promise<void>((resolve) => {
@@ -94,6 +100,7 @@ export class TurnLifecycleCoordinator {
     const active: ActiveTurnLifecycleState = {
       scopeId,
       chatId,
+      profileId: options.profileId ?? null,
       topicId,
       renderRoute: resolveTelegramRenderRoute(chatType, topicId),
       threadId,
@@ -187,24 +194,13 @@ export class TurnLifecycleCoordinator {
   }
 
   async abandonAllTurns(): Promise<void> {
-    const activeTurns = this.host.listActiveTurns();
-    for (const active of activeTurns) {
-      this.host.clearToolBatchTimer(active.toolBatch);
-      this.host.clearRenderRetry(active);
-      if (active.previewActive) {
-        await this.host.retirePreviewMessage(
-          active.scopeId,
-          active.previewMessageId,
-          t(this.host.localeForChat(active.scopeId), 'stale_preview_expired'),
-          active.turnId,
-        );
-      }
-      active.resolver();
-      this.host.deleteActiveTurn(active.turnId);
-    }
-    if (activeTurns.length > 0) {
-      this.host.updateStatus();
-    }
+    await this.abandonTurns(this.host.listActiveTurns(), { restartQueuedTurns: false });
+  }
+
+  async abandonTurnsByProfile(profileId: string): Promise<number> {
+    const activeTurns = this.host.listActiveTurns().filter((active) => active.profileId === profileId);
+    await this.abandonTurns(activeTurns, { restartQueuedTurns: true });
+    return activeTurns.length;
   }
 
   private async completeTurn(active: ActiveTurnLifecycleState): Promise<void> {
@@ -249,6 +245,41 @@ export class TurnLifecycleCoordinator {
       await this.host.autostartQueuedTurn(active.scopeId);
     } catch (error) {
       await this.host.handleAsyncError('queue.autostart', error, active.scopeId);
+    }
+  }
+
+  private async abandonTurns(
+    activeTurns: ActiveTurnLifecycleState[],
+    options: { restartQueuedTurns: boolean },
+  ): Promise<void> {
+    const affectedScopes = new Set<string>();
+    for (const active of activeTurns) {
+      this.host.clearToolBatchTimer(active.toolBatch);
+      this.host.clearRenderRetry(active);
+      if (active.previewActive) {
+        await this.host.retirePreviewMessage(
+          active.scopeId,
+          active.previewMessageId,
+          t(this.host.localeForChat(active.scopeId), 'stale_preview_expired'),
+          active.turnId,
+        );
+      }
+      active.resolver();
+      this.host.deleteActiveTurn(active.turnId);
+      affectedScopes.add(active.scopeId);
+    }
+    if (activeTurns.length > 0) {
+      this.host.updateStatus();
+    }
+    if (!options.restartQueuedTurns) {
+      return;
+    }
+    for (const scopeId of affectedScopes) {
+      try {
+        await this.host.autostartQueuedTurn(scopeId);
+      } catch (error) {
+        await this.host.handleAsyncError('queue.autostart', error, scopeId);
+      }
     }
   }
 }

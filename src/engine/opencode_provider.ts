@@ -184,12 +184,12 @@ export class OpenCodeEngineProvider extends EventEmitter implements EngineProvid
     return filtered.map((session) => this.toAppThread(this.sessionRecords.get(session.id) ?? this.toSessionRecord(session)));
   }
 
-  async readThread(threadId: string): Promise<AppThread | null> {
+  async readThread(threadId: string, _includeTurns = false, _scopeId?: string | null): Promise<AppThread | null> {
     const record = await this.loadSessionRecord(threadId, false);
     return record ? this.toAppThread(record) : null;
   }
 
-  async readThreadWithTurns(threadId: string): Promise<AppThreadWithTurns | null> {
+  async readThreadWithTurns(threadId: string, _scopeId?: string | null): Promise<AppThreadWithTurns | null> {
     const record = await this.loadSessionRecord(threadId, true);
     if (!record) {
       return null;
@@ -201,7 +201,7 @@ export class OpenCodeEngineProvider extends EventEmitter implements EngineProvid
     };
   }
 
-  async renameThread(threadId: string, name: string): Promise<void> {
+  async renameThread(threadId: string, name: string, _scopeId?: string | null): Promise<void> {
     const record = await this.requireSessionRecord(threadId, false);
     const updated = await this.client.updateSession(record.session.id, { title: name.trim() || record.session.title }, record.session.directory);
     await this.ensureSessionRecord(updated, null);
@@ -304,7 +304,7 @@ export class OpenCodeEngineProvider extends EventEmitter implements EngineProvid
     throw unsupportedProviderFeature('opencode', 'steerTurn', 'Active-turn steering is not supported by OpenCode yet');
   }
 
-  async interruptTurn(_threadId: string, turnId: string): Promise<void> {
+  async interruptTurn(_threadId: string, turnId: string, _scopeId?: string | null): Promise<void> {
     const active = this.activeTurns.get(turnId);
     if (!active) {
       return;
@@ -313,7 +313,7 @@ export class OpenCodeEngineProvider extends EventEmitter implements EngineProvid
     await this.client.abortSession(active.threadId, active.cwd);
   }
 
-  async respond(requestId: string | number, result: unknown): Promise<void> {
+  async respond(requestId: string | number, result: unknown, _scopeId?: string | null): Promise<void> {
     const request = this.pendingRequests.get(String(requestId));
     if (!request) {
       return;
@@ -335,7 +335,7 @@ export class OpenCodeEngineProvider extends EventEmitter implements EngineProvid
     this.pendingRequests.delete(String(requestId));
   }
 
-  async respondError(requestId: string | number, _message: string): Promise<void> {
+  async respondError(requestId: string | number, _message: string, _scopeId?: string | null): Promise<void> {
     const request = this.pendingRequests.get(String(requestId));
     if (!request) {
       return;
@@ -349,7 +349,7 @@ export class OpenCodeEngineProvider extends EventEmitter implements EngineProvid
     this.pendingRequests.delete(String(requestId));
   }
 
-  async listModels(): Promise<ModelInfo[]> {
+  async listModels(_scopeId?: string | null): Promise<ModelInfo[]> {
     const catalog = await this.client.listProviders();
     this.modelsCache = catalog;
     const defaultMap = catalog.default;

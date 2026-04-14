@@ -158,6 +158,7 @@ export class TurnGuidanceCoordinator {
         threadId: active.threadId,
         turnId: active.turnId,
         input: record.input as TurnInput[],
+        scopeId: record.scopeId,
       });
     } catch (error) {
       this.host.logger.warn('guidance.steer_failed', {
@@ -213,6 +214,7 @@ export class TurnGuidanceCoordinator {
         threadId: active.threadId,
         turnId: active.turnId,
         input,
+        scopeId: event.scopeId,
       });
     } catch (error) {
       await this.host.messages.sendMessage(

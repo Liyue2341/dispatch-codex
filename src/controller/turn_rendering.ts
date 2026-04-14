@@ -17,6 +17,7 @@ export interface TurnSegmentState {
   itemId: string;
   phase: string | null;
   outputKind: TurnOutputKind;
+  rawText: string;
   text: string;
   completed: boolean;
   messages: RenderedTelegramMessage[];
@@ -287,7 +288,7 @@ export class TurnRenderingCoordinator {
         turnId: active.turnId,
         draftId: active.draftId,
       });
-      this.host.scheduleRenderRetry(active);
+      this.host.scheduleRenderRetry(active, telegramRetryAfterMs(error));
     }
   }
 
@@ -318,7 +319,7 @@ export class TurnRenderingCoordinator {
             itemId: segment.itemId,
             chunkIndex: index,
           });
-          this.host.scheduleRenderRetry(active);
+          this.host.scheduleRenderRetry(active, telegramRetryAfterMs(error));
           return;
         }
         index += 1;
@@ -344,7 +345,7 @@ export class TurnRenderingCoordinator {
           messageId: existing.messageId,
           chunkIndex: index,
         });
-        this.host.scheduleRenderRetry(active);
+        this.host.scheduleRenderRetry(active, telegramRetryAfterMs(error));
         return;
       }
     }
@@ -390,6 +391,7 @@ export function ensureTurnSegment(
     itemId,
     phase: phase ?? null,
     outputKind: outputKind ?? 'commentary',
+    rawText: '',
     text: '',
     completed: false,
     messages: [],
@@ -639,4 +641,13 @@ function isTelegramMessageGone(error: unknown): boolean {
   return message.includes('message to delete not found')
     || message.includes('message to edit not found')
     || message.includes('message not found');
+}
+
+function telegramRetryAfterMs(error: unknown): number | undefined {
+  const match = formatUserError(error).match(/retry after\s+(\d+)/i);
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const seconds = Number.parseInt(match[1], 10);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : undefined;
 }

@@ -103,7 +103,7 @@ export class ApprovalCoordinator {
       return true;
     }
 
-    await this.host.app.respond(approval.serverRequestId, mapApprovalDecision(action));
+    await this.host.app.respond(approval.serverRequestId, mapApprovalDecision(action), approval.chatId);
     this.host.store.markApprovalResolved(localId);
     this.clearApprovalTimer(localId);
     await this.host.clearPendingApprovalStatus(approval.threadId, approval.kind);
@@ -173,7 +173,7 @@ export class ApprovalCoordinator {
       return;
     }
     try {
-      await this.host.app.respond(approval.serverRequestId, { decision: 'decline' });
+      await this.host.app.respond(approval.serverRequestId, { decision: 'decline' }, approval.chatId);
       this.host.store.markApprovalResolved(localId);
       await this.host.clearPendingApprovalStatus(approval.threadId, approval.kind);
       const locale = this.host.localeForChat(approval.chatId);

@@ -97,6 +97,7 @@ test('completion flushes archived status before final stream output when request
       itemId: 'item-1',
       phase: 'final',
       outputKind: 'final_answer' as const,
+      rawText: 'Done.',
       text: 'Done.',
       completed: true,
       messages: [],
