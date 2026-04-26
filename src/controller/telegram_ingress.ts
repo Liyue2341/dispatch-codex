@@ -64,6 +64,7 @@ export class TelegramIngressRouter {
       help: (event, locale) => this.showHelp(event.scopeId, locale),
       status: (event, locale) => this.host.statusCommand.showStatus(event.scopeId, locale),
       where: (event, locale) => this.host.settings.showWherePanel(event.scopeId, undefined, locale),
+      resume: (event, locale, args) => this.handleResumeCommand(event.scopeId, locale, args),
       threads: (event, locale, args) => {
         const query = parseThreadsCommandArgs(args);
         return this.host.threadPanels.showThreadsPanel(event.scopeId, undefined, query.searchTerm, locale, { archived: query.archived });
@@ -349,6 +350,24 @@ export class TelegramIngressRouter {
     ].join('\n'));
   }
 
+  private async handleResumeCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
+    const first = (args[0] ?? '').trim().toLowerCase();
+    if (!first) {
+      await this.host.threadPanels.showThreadsPanel(scopeId, undefined, null, locale, { archived: false });
+      return;
+    }
+    if (first === 'new' || first === '--new') {
+      await this.handleNewCommand(scopeId, locale, args.slice(1));
+      return;
+    }
+    const target = Number.parseInt(first, 10);
+    if (Number.isFinite(target) && String(target) === first) {
+      await this.handleOpenCommand(scopeId, locale, [first]);
+      return;
+    }
+    await this.host.threadPanels.showThreadsPanel(scopeId, undefined, args.join(' ').trim(), locale, { archived: false });
+  }
+
   private async handleOpenCommand(scopeId: string, locale: AppLocale, args: string[]): Promise<void> {
     const target = Number.parseInt(args[0] || '', 10);
     if (!Number.isFinite(target)) {
@@ -432,6 +451,7 @@ export class TelegramIngressRouter {
   private isCommandSupported(name: string): boolean {
     const capabilities = resolveEngineCapabilities(this.host.providerCapabilities);
     switch (name) {
+      case 'resume':
       case 'threads':
       case 'open':
         return capabilities.threads;
