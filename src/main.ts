@@ -6,6 +6,7 @@ import { createEngineProvider } from './engine/factory.js';
 import { Logger } from './logger.js';
 import { BridgeStore } from './store/database.js';
 import { TelegramGateway } from './telegram/gateway.js';
+import { callTelegramApi } from './telegram/api.js';
 import { BridgeController } from './controller/controller.js';
 import { acquireProcessLock, LockHeldError } from './lock.js';
 import { detectPlatformCapabilities, getCommandLookupProgram, getDesktopOpenSupport } from './platform/capabilities.js';
@@ -14,6 +15,12 @@ import { readRuntimeStatus, writeRuntimeStatus } from './runtime.js';
 
 const command = process.argv[2] || 'serve';
 loadEnvFile();
+
+interface TelegramWebhookInfo {
+  url?: string;
+  pending_update_count?: number;
+  last_error_message?: string;
+}
 
 async function main(): Promise<void> {
   if (command === 'status') {
@@ -99,6 +106,20 @@ async function main(): Promise<void> {
       console.log(`[FAIL] default cwd missing: ${cwd}`);
       failed = true;
     }
+
+    const webhookResult = await checkTelegramWebhook(process.env.TG_BOT_TOKEN);
+    if (webhookResult.kind === 'ok') {
+      console.log('[OK] telegram webhook is clear; long polling can receive updates');
+    } else if (webhookResult.kind === 'configured') {
+      console.log(`[FAIL] telegram webhook is configured: ${webhookResult.url}`);
+      console.log('       Clear it before using long polling, for example: https://api.telegram.org/bot<TOKEN>/deleteWebhook?drop_pending_updates=true');
+      failed = true;
+    } else if (webhookResult.kind === 'skipped') {
+      console.log('[WARN] telegram webhook check skipped: bot token is missing');
+    } else {
+      console.log(`[WARN] telegram webhook check failed: ${webhookResult.error}`);
+    }
+
     process.exit(failed ? 1 : 0);
   }
 
@@ -221,6 +242,30 @@ function hasCodexAppServer(configuredCodexBin: string | undefined): boolean {
     return result.status === 0;
   } catch {
     return false;
+  }
+}
+
+async function checkTelegramWebhook(botToken: string | undefined): Promise<
+  | { kind: 'ok' }
+  | { kind: 'configured'; url: string }
+  | { kind: 'skipped' }
+  | { kind: 'error'; error: string }
+> {
+  if (!botToken || !botToken.trim()) {
+    return { kind: 'skipped' };
+  }
+  try {
+    const result = await callTelegramApi<TelegramWebhookInfo>(botToken, 'getWebhookInfo', {});
+    if (!result.ok || !result.result) {
+      return { kind: 'error', error: result.description || 'Telegram getWebhookInfo failed' };
+    }
+    const url = result.result.url?.trim() ?? '';
+    if (url) {
+      return { kind: 'configured', url };
+    }
+    return { kind: 'ok' };
+  } catch (error) {
+    return { kind: 'error', error: error instanceof Error ? error.message : String(error) };
   }
 }
 
