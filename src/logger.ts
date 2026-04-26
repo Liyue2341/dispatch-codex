@@ -4,6 +4,12 @@ import path from 'node:path';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 const RANK: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 const MAX_SIZE = 1_000_000;
+const REDACTED = '[REDACTED]';
+
+const SENSITIVE_KEY_PATTERN = /(token|secret|password|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|bot[_-]?token)/i;
+const TELEGRAM_BOT_TOKEN_PATTERN = /\b\d{6,}:[A-Za-z0-9_-]{20,}\b/g;
+const BEARER_TOKEN_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
+const OPENAI_SESSION_TOKEN_PATTERN = /\b(?:sess|sk)-[A-Za-z0-9_-]{16,}\b/g;
 
 export class Logger {
   constructor(private level: LogLevel, private filePath: string) {
@@ -20,8 +26,8 @@ export class Logger {
     const record = {
       time: new Date().toISOString(),
       level,
-      message,
-      ...(meta === undefined ? {} : { meta })
+      message: redactText(message),
+      ...(meta === undefined ? {} : { meta: redactValue(meta) })
     };
     const line = JSON.stringify(record);
     if (level === 'error') {
@@ -50,4 +56,38 @@ export class Logger {
       // ignore missing file
     }
   }
+}
+
+function redactValue(value: unknown, depth = 0): unknown {
+  if (depth > 8) {
+    return '[MaxDepth]';
+  }
+  if (typeof value === 'string') {
+    return redactText(value);
+  }
+  if (typeof value !== 'object' || value === null) {
+    return value;
+  }
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: redactText(value.message),
+      stack: value.stack ? redactText(value.stack) : undefined,
+    };
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactValue(entry, depth + 1));
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    output[key] = SENSITIVE_KEY_PATTERN.test(key) ? REDACTED : redactValue(entry, depth + 1);
+  }
+  return output;
+}
+
+function redactText(value: string): string {
+  return value
+    .replace(TELEGRAM_BOT_TOKEN_PATTERN, REDACTED)
+    .replace(BEARER_TOKEN_PATTERN, `Bearer ${REDACTED}`)
+    .replace(OPENAI_SESSION_TOKEN_PATTERN, REDACTED);
 }
