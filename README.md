@@ -1,87 +1,58 @@
-# telegram-codex-app-bridge
+# dispatch-codex
 
-Use Telegram to control a local AI coding engine. The same codebase now supports two single-engine deployment modes:
+A small Telegram remote-control bridge for local Codex sessions.
 
-- `codex`: bridges to `codex app-server`
-- `gemini`: bridges to `gemini -p --output-format stream-json`
+The goal is simple: keep Codex running on your own computer, then use your phone to pick up an existing Codex thread, continue the conversation, see output, approve actions, and stop a running turn when needed.
 
-The runtime model is fixed:
+This project is intentionally focused on Codex. It talks to the local `codex app-server`; Telegram is only the mobile control surface.
 
-- one bot = one engine
-- one instance = one `.env.*` file
-- one topic = one bot
-- no runtime engine switching inside a topic
+## What this is for
 
-## What works
+You are working with Codex on your computer. Later, from your phone, you want to open Telegram, choose the thread you were working on, send normal natural-language follow-ups, and approve permission requests without opening a terminal or remote desktop.
 
-- Private chat or topic-aware group control for one allowed Telegram user
-- Separate Codex and Gemini instances on the same host
-- Sticky chat/topic binding, queued follow-ups, staged attachments, and restart-safe recovery
-- Guided plan flow for Codex bots with confirm-or-revise gating
-- Provider-aware `/help`, `/status`, `/settings`, and slash-command registration
-- User-service deployment for Linux (`systemd --user`), macOS (`launchd`), and Windows (`WinSW`)
+The main command is:
 
-## Engine differences
+```text
+/resume
+```
 
-Both engines share the same Telegram shell, but the capabilities are intentionally not identical.
-
-| Capability | Codex bot | Gemini bot |
-| --- | --- | --- |
-| Plain-text turns | Yes | Yes |
-| Attachment staging | Yes | Yes |
-| Queue and interrupt | Yes | Yes |
-| `/threads` and `/open` | Yes | No |
-| `/reveal` into local desktop host | Yes | No |
-| Guided plan mode | Full | No |
-| Approval controls | Full | No |
-| Rate-limit snapshot in `/status` | Yes | No |
-| `/reconnect` | Yes | No |
-
-The bridge does not try to fake missing Gemini features. Unsupported commands are hidden from Gemini slash menus and rejected with a clear reply if called directly.
+`/resume` shows recent Codex threads. Tap a thread, and that Telegram chat/topic is bound to it. After that, plain text continues the selected thread.
 
 ## Requirements
 
-- Linux, macOS, or Windows
-- Node.js 24+
-- One Telegram bot token per instance
-- Your Telegram numeric user id
-- For `codex` instances:
-  - authenticated `codex` CLI
-- For `gemini` instances:
-  - authenticated `gemini` CLI
+Node.js 24+ / authenticated `codex` CLI / Telegram bot token / your numeric Telegram user ID.
 
-Windows services are installed through the bundled PowerShell scripts. The installer writes your current profile paths into the service environment so existing Codex or Gemini CLI auth can still resolve from the same Windows user profile. Foreground mode is still useful for first-run diagnostics, but production Windows deployments should use the service install flow.
+The Codex CLI must work under the same OS user that runs this bridge. Run this first on the target computer:
 
-## Instance layout
-
-Recommended naming:
-
-- `linux144-codex`
-- `linux144-gemini`
-
-Recommended bot topology in one Telegram group:
-
-- `Linux144bot` -> Codex topic
-- `Glinux144bot` -> Gemini topic
-
-Each topic should belong to exactly one bot. Do not share a topic across bots.
+```bash
+codex --version
+codex app-server --help
+```
 
 ## Quick start
 
-Install dependencies once:
-
 ```bash
+git clone https://github.com/Liyue2341/dispatch-codex.git
+cd dispatch-codex
 npm install
-```
-
-Create one env file per instance:
-
-```bash
 cp .env.example .env.codex
-cp .env.example .env.gemini
 ```
 
-Build and run a foreground instance:
+Edit `.env.codex`:
+
+```dotenv
+BRIDGE_ENGINE=codex
+BRIDGE_INSTANCE_ID=dispatch-codex
+TG_BOT_TOKEN=your_telegram_bot_token
+TG_ALLOWED_USER_ID=your_numeric_telegram_user_id
+DEFAULT_CWD=/absolute/path/to/workspace
+CODEX_CLI_BIN=codex
+DEFAULT_APPROVAL_POLICY=on-request
+DEFAULT_SANDBOX_MODE=workspace-write
+CODEX_APP_SYNC_ON_OPEN=true
+```
+
+Then build, check, and run in the foreground:
 
 ```bash
 ENV_FILE=.env.codex npm run build
@@ -89,241 +60,82 @@ ENV_FILE=.env.codex npm run doctor
 ENV_FILE=.env.codex npm run serve
 ```
 
-For Gemini:
+Open Telegram and send:
 
-```bash
-ENV_FILE=.env.gemini npm run build
-ENV_FILE=.env.gemini npm run doctor
-ENV_FILE=.env.gemini npm run serve
+```text
+/resume
 ```
 
-Windows PowerShell foreground start:
+## Core commands
 
-```powershell
-$env:ENV_FILE=".env.codex"
-npm run build
-$env:ENV_FILE=".env.codex"
-npm run doctor
-$env:ENV_FILE=".env.codex"
-npm run serve
-```
+`/resume` shows recent Codex threads and lets you bind one. `/resume keyword` searches threads. `/resume 3` opens the third cached thread from the latest list. `/resume new` starts a new thread.
 
-For Gemini on Windows:
+`/where` shows the current bound thread. `/interrupt` stops the active turn. `/permissions` opens access settings. `/status` shows bridge/runtime status. `/reconnect` refreshes the Codex app-server session.
 
-```powershell
-$env:ENV_FILE=".env.gemini"
-npm run build
-$env:ENV_FILE=".env.gemini"
-npm run doctor
-$env:ENV_FILE=".env.gemini"
-npm run serve
-```
+Most of the time, after `/resume`, you should just type normally.
 
-If the Codex CLI was installed through the Microsoft Store and the default `codex` command is not directly executable from Node, set `CODEX_CLI_BIN` in your env file to a directly runnable `codex.exe` path.
+## Approval flow
 
-## Example env files
-
-Codex bot:
+Keep the default safe-but-usable settings first:
 
 ```dotenv
-BRIDGE_ENGINE=codex
-BRIDGE_INSTANCE_ID=linux144-codex
-TG_BOT_TOKEN=123456:codex-token
-TG_ALLOWED_USER_ID=123456789
-TG_ALLOWED_CHAT_ID=-1001234567890
-TG_ALLOWED_TOPIC_ID=101
-DEFAULT_CWD=/home/ubuntu/dev
-CODEX_CLI_BIN=/home/ubuntu/.local/bin/codex
-CODEX_APP_AUTOLAUNCH=false
-CODEX_APP_SYNC_ON_OPEN=true
-CODEX_APP_SYNC_ON_TURN_COMPLETE=false
+DEFAULT_APPROVAL_POLICY=on-request
+DEFAULT_SANDBOX_MODE=workspace-write
 ```
 
-Gemini bot:
+When Codex asks for permission, Telegram shows buttons such as Allow, Allow Session, Deny, and Details. This is the important mobile-control path; you do not need to use complex slash commands for normal work.
+
+## Telegram setup notes
+
+For private use, `TG_ALLOWED_USER_ID` is the main security boundary. Only that Telegram user can control the bot.
+
+For group/topic use, also set:
 
 ```dotenv
-BRIDGE_ENGINE=gemini
-BRIDGE_INSTANCE_ID=linux144-gemini
-TG_BOT_TOKEN=123456:gemini-token
-TG_ALLOWED_USER_ID=123456789
-TG_ALLOWED_CHAT_ID=-1001234567890
-TG_ALLOWED_TOPIC_ID=202
-DEFAULT_CWD=/home/ubuntu/dev
-GEMINI_CLI_BIN=/home/ubuntu/.local/bin/gemini
-GEMINI_DEFAULT_MODEL=gemini-2.5-pro
-GEMINI_MODEL_ALLOWLIST=gemini-2.5-pro,gemini-2.5-flash
-GEMINI_HEADLESS_TIMEOUT_MS=300000
+TG_ALLOWED_CHAT_ID=-100xxxxxxxxxx
+TG_ALLOWED_TOPIC_ID=123
 ```
 
-## Service install
+If messages do not arrive, make sure no webhook is configured for the same bot and no other process is polling the same bot token. `npm run doctor` is intended to catch the common setup problems.
 
-Service install is supported on Linux, macOS, and Windows.
+## Local desktop vs VPS
 
-Linux user service:
+On your own desktop/laptop, `CODEX_APP_SYNC_ON_OPEN=true` is useful because selecting a thread can sync/reveal it in the local Codex host.
 
-```bash
-ENV_FILE=.env.codex ./scripts/service/install.sh
-ENV_FILE=.env.gemini ./scripts/service/install.sh
+On a headless VPS, set it to false:
+
+```dotenv
+CODEX_APP_SYNC_ON_OPEN=false
 ```
 
-Useful service commands:
-
-```bash
-ENV_FILE=.env.codex ./scripts/service/status.sh
-ENV_FILE=.env.codex ./scripts/service/logs.sh
-ENV_FILE=.env.codex ./scripts/service/restart-safe.sh
-
-ENV_FILE=.env.gemini ./scripts/service/status.sh
-ENV_FILE=.env.gemini ./scripts/service/logs.sh
-ENV_FILE=.env.gemini ./scripts/service/restart-safe.sh
-```
-
-`restart-safe.sh` and `restart-safe.ps1` are instance-aware. They build, restart only the targeted service, wait for `running=true` and `connected=true`, then send a Telegram callback back to the latest active scope.
-
-macOS install uses the same `ENV_FILE` pattern:
-
-```bash
-ENV_FILE=.env.codex ./scripts/service/install.sh
-```
-
-Windows PowerShell service install:
-
-```powershell
-$env:ENV_FILE=".env.codex"
-npm run build
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\install.ps1
-```
-
-Run the installer from an elevated PowerShell session.
-
-Useful Windows service commands:
-
-```powershell
-$env:ENV_FILE=".env.codex"
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\status.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\logs.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\restart-safe.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\stop.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\service\uninstall.ps1
-```
-
-The Windows installer downloads `WinSW-x64.exe` from the official WinSW GitHub releases on first install. Set `WINDOWS_SERVICE_WRAPPER_PATH` to use a pre-downloaded wrapper binary instead, or `WINDOWS_SERVICE_WRAPPER_URL` to pin a specific release URL.
-
-## Telegram setup
-
-1. Create one bot token per engine with `@BotFather`.
-2. Put each token into its own env file.
-3. Set the same `TG_ALLOWED_USER_ID` for both instances if one operator controls both.
-4. If you use a shared group:
-   - set the same `TG_ALLOWED_CHAT_ID`
-   - give each bot its own `TG_ALLOWED_TOPIC_ID`
-5. Disable privacy mode and re-add the bot if natural-language group messages do not arrive.
-
-## Commands
-
-Shared commands:
-
-- `/help`
-- `/status`
-- `/new`
-- `/models`
-- `/settings`
-- `/queue`
-- `/where`
-- `/interrupt`
-- `/restart`
-
-Codex-only commands:
-
-- `/threads`
-- `/open`
-- `/guide`
-- `/permissions`
-- `/mode`
-- `/plan`
-- `/reconnect`
-- `/reveal`
-- `/tier`
-- `/fast`
-- `/effort`
-
-## Guided plan flow
-
-Codex bots can run a Telegram-adapted guided plan loop:
-
-1. Draft a plan without executing.
-2. Render one live plan card as the plan evolves.
-3. Ask you to `Continue`, `Revise`, or `Cancel`.
-4. After confirmation, continue execution and request focused structured input when needed.
-5. Recover pending plan/input/approval cards after restart.
-
-Gemini bots do not expose this flow in v1.
+The bridge still works; it just avoids trying to open/reveal a local desktop Codex UI.
 
 ## Attachments
 
-Telegram attachments are staged first instead of being forced into the same turn immediately.
+Telegram attachments are saved under the selected thread workspace, inside `.telegram-inbox/`. This is intentional: Codex needs a local path to inspect the file.
 
-- Albums are merged into one saved batch.
-- The bridge replies with saved paths and metadata.
-- Your next plain-text message can consume that batch automatically.
-- You can also trigger `Analyze now` or clear the batch.
-
-This behavior is shared by Codex and Gemini.
-
-## Topic rules
-
-- One topic should contain one bot only.
-- Keep Codex and Gemini in separate topics.
-- Do not reuse one topic when you replace a bot unless you also update the env binding and restart that instance.
-- If several bots share one group, prefer topic names that already show the engine, for example:
-  - `linux144-codex`
-  - `linux144-gemini`
-
-## Smoke checklist
-
-Per instance:
-
-1. `/status` shows the correct engine and instance id.
-2. `/help` exposes only the commands that engine supports.
-3. Plain-text turn works.
-4. `/interrupt` stops an active turn.
-5. A follow-up message queues and resumes.
-6. A Telegram image or file is staged and then consumed on the next message.
-7. `/restart` restarts only that instance.
-
-Extra Codex checks:
-
-1. `/threads` and `/open` work.
-2. `/mode` enters plan mode.
-3. Guided plan confirmation, revise, and cancel all work.
-4. `/reconnect` refreshes the Codex session.
-
-Extra Gemini checks:
-
-1. Gemini topic responds only through the Gemini bot.
-2. Codex-only commands are hidden from slash suggestions.
-3. Calling a Codex-only command manually returns a clear unsupported message.
-
-Shared-group checks:
-
-1. Codex bot ignores the Gemini topic.
-2. Gemini bot ignores the Codex topic.
-3. Both services can run at the same time without sharing state files.
-
-## Finding chat and topic ids
-
-To discover `TG_ALLOWED_CHAT_ID` and `TG_ALLOWED_TOPIC_ID`:
-
-1. Stop the target instance.
-2. Send a message in the target group or topic.
-3. Open:
+Example: if the current thread cwd is `/Users/me/project-a`, an uploaded image may be saved under:
 
 ```text
-https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+/Users/me/project-a/.telegram-inbox/2026-04-26/<thread-id>/...
 ```
 
-4. Read:
-   - `message.chat.id` -> `TG_ALLOWED_CHAT_ID`
-   - `message.message_thread_id` -> `TG_ALLOWED_TOPIC_ID`
+If you switch to a thread whose cwd is `/Users/me/project-b`, later uploads go into project B instead. `.telegram-inbox/` is gitignored by this repository, but you should also avoid committing it in your own projects.
 
-If the instance is still polling, it may consume the update before you inspect it.
+## Service mode
+
+After foreground mode works, install it as a user service:
+
+```bash
+ENV_FILE=.env.codex ./scripts/service/install.sh
+ENV_FILE=.env.codex ./scripts/service/status.sh
+ENV_FILE=.env.codex ./scripts/service/logs.sh
+```
+
+Foreground mode is better for the first run; service mode is better once the setup is stable.
+
+## Smoke test
+
+Start the bridge, then in Telegram try `/status`, `/resume`, select a thread, send a simple natural-language message, trigger a harmless file read or command approval, and try `/interrupt` during a longer run.
+
+If those work, the core mobile handoff path is working.
