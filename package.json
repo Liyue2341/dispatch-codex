@@ -1,16 +1,16 @@
 {
-  "name": "telegram-codex-app-bridge",
+  "name": "dispatch-codex",
   "version": "0.1.0",
-  "description": "Bridge a Telegram bot to a local Codex host via codex app-server.",
+  "description": "Telegram remote control bridge for local Codex app-server sessions.",
   "type": "module",
-  "private": false,
+  "private": true,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Gan-Xing/telegram-codex-app-bridge.git"
+    "url": "git+https://github.com/Liyue2341/dispatch-codex.git"
   },
-  "homepage": "https://github.com/Gan-Xing/telegram-codex-app-bridge#readme",
+  "homepage": "https://github.com/Liyue2341/dispatch-codex#readme",
   "bugs": {
-    "url": "https://github.com/Gan-Xing/telegram-codex-app-bridge/issues"
+    "url": "https://github.com/Liyue2341/dispatch-codex/issues"
   },
   "engines": {
     "node": ">=24"
