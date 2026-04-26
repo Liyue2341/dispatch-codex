@@ -81,23 +81,12 @@ export function loadConfig(): AppConfig {
   const envFile = loadEnvFile();
   const platform = detectPlatformCapabilities();
   const runtimePaths = resolveBridgeRuntimePaths();
-  const requestedDefaultProviderId = optional('CODEX_DEFAULT_PROVIDER_PROFILE_ID');
   const codexProviderProfiles = loadCodexProviderProfiles({
-    codexRealBin: process.env.CODEX_REAL_BIN || resolveCommand('codex') || 'codex',
-    codexProxyBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
-    codexProxyModelCatalogPath: optional('CODEX_MODEL_CATALOG_PATH'),
-    codexProxyDefaultModel: optional('CODEX_PROVIDER_DEFAULT_MODEL') ?? 'MiniMax-M2.7',
-    codexProxyDisplayName: optional('CODEX_PROVIDER_NAME') ?? 'CLIProxyAPI MiniMax',
-    codexProxyProviderLabel: optional('CODEX_PROVIDER_ID') ?? 'cliproxyminimax',
-    codexProxyBaseUrl: optional('CODEX_PROVIDER_BASE_URL'),
-    defaultProviderId: requestedDefaultProviderId,
+    codexCliBin: process.env.CODEX_CLI_BIN || resolveCommand('codex') || 'codex',
+    codexModelCatalogPath: optional('CODEX_MODEL_CATALOG_PATH'),
   });
-  const codexDefaultProviderProfileId = codexProviderProfiles.some((profile) => profile.id === (requestedDefaultProviderId ?? ''))
-    ? String(requestedDefaultProviderId!)
-    : codexProviderProfiles[0]?.id ?? 'openai-native';
-  const defaultCodexProfile = codexProviderProfiles.find((profile) => profile.id === codexDefaultProviderProfileId)
-    ?? codexProviderProfiles[0]
-    ?? null;
+  const codexDefaultProviderProfileId = 'openai-native';
+  const defaultCodexProfile = codexProviderProfiles[0] ?? null;
   const config: AppConfig = {
     envFile,
     platform,
@@ -169,21 +158,15 @@ export function loadEnvFile(env = process.env, cwd = process.cwd()): string {
 }
 
 export function loadCodexProviderProfiles(options: {
-  codexRealBin: string;
-  codexProxyBin: string;
-  codexProxyModelCatalogPath: string | null;
-  codexProxyDefaultModel: string | null;
-  codexProxyDisplayName: string;
-  codexProxyProviderLabel: string;
-  codexProxyBaseUrl: string | null;
-  defaultProviderId: string | null;
+  codexCliBin: string;
+  codexModelCatalogPath: string | null;
 }): CodexProviderProfileConfig[] {
-  const openaiProfile: CodexProviderProfileConfig = {
+  return [{
     id: 'openai-native',
     displayName: 'OpenAI Codex',
-    cliBin: options.codexRealBin,
-    modelCatalogPath: null,
-    modelCatalog: [],
+    cliBin: options.codexCliBin,
+    modelCatalogPath: options.codexModelCatalogPath,
+    modelCatalog: loadCodexModelCatalog(options.codexModelCatalogPath),
     defaultModel: null,
     providerLabel: 'openai',
     backendBaseUrl: null,
@@ -192,31 +175,7 @@ export function loadCodexProviderProfiles(options: {
       reasoningEffort: true,
       serviceTier: true,
     },
-  };
-  const proxyProfile: CodexProviderProfileConfig = {
-    id: 'cliproxyminimax',
-    displayName: options.codexProxyDisplayName,
-    cliBin: options.codexProxyBin,
-    modelCatalogPath: options.codexProxyModelCatalogPath,
-    modelCatalog: loadCodexModelCatalog(options.codexProxyModelCatalogPath),
-    defaultModel: options.codexProxyDefaultModel,
-    providerLabel: options.codexProxyProviderLabel,
-    backendBaseUrl: options.codexProxyBaseUrl,
-    modelCatalogMode: 'overlay-only',
-    capabilities: {
-      reasoningEffort: true,
-      serviceTier: false,
-    },
-  };
-  const preferredId = options.defaultProviderId?.trim().toLowerCase();
-  const defaultProfileId = preferredId === 'openai-native'
-    ? openaiProfile.id
-    : preferredId === 'cliproxyminimax'
-      ? proxyProfile.id
-      : openaiProfile.id;
-  return defaultProfileId === proxyProfile.id
-    ? [proxyProfile, openaiProfile]
-    : [openaiProfile, proxyProfile];
+  }];
 }
 
 export function resolveEnvFilePath(env = process.env, cwd = process.cwd()): string {
