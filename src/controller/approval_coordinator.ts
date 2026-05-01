@@ -60,6 +60,16 @@ export class ApprovalCoordinator {
     params: any,
   ): Promise<void> {
     const approval = this.createApprovalRecord(kind, serverRequestId, params);
+    this.host.logger.info('approval.request_received', {
+      localId: approval.localId,
+      serverRequestId: approval.serverRequestId,
+      kind: approval.kind,
+      threadId: approval.threadId,
+      turnId: approval.turnId,
+      itemId: approval.itemId,
+      riskLevel: approval.riskLevel,
+      summary: approval.summary,
+    });
     await this.host.notePendingApprovalStatus(approval.threadId, approval.kind);
     const locale = this.host.localeForChat(approval.chatId);
     const messageId = await this.host.sendMessage(
@@ -103,7 +113,24 @@ export class ApprovalCoordinator {
       return true;
     }
 
-    await this.host.app.respond(approval.serverRequestId, mapApprovalDecision(action), approval.chatId);
+    const decision = mapApprovalDecision(action);
+    this.host.logger.info('approval.decision_sending', {
+      localId,
+      serverRequestId: approval.serverRequestId,
+      kind: approval.kind,
+      threadId: approval.threadId,
+      turnId: approval.turnId,
+      action,
+      decision,
+    });
+    await this.host.app.respond(approval.serverRequestId, decision, approval.chatId);
+    this.host.logger.info('approval.decision_sent', {
+      localId,
+      serverRequestId: approval.serverRequestId,
+      threadId: approval.threadId,
+      turnId: approval.turnId,
+      action,
+    });
     this.host.store.markApprovalResolved(localId);
     this.clearApprovalTimer(localId);
     await this.host.clearPendingApprovalStatus(approval.threadId, approval.kind);
